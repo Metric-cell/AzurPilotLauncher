@@ -16,7 +16,7 @@
 //! - 时间炸弹：运行时从内嵌 Cargo.toml 解析过期配置，经 HTTP Date 头获取
 //!   网络时间比对，过期则弹窗并阻止启动；
 //! - 三平台关闭行为：Windows 弹出窗口内"退出/最小化到托盘"选择菜单，
-//!   macOS 最小化到托盘并隐藏 Dock 图标，Linux 直接隐藏窗口。
+//!   macOS 最小化到托盘并隐藏 Dock 图标，Linux 关闭窗口退出。
 
 // 在 Windows 上不创建默认控制台窗口
 #![windows_subsystem = "windows"]
@@ -35,6 +35,9 @@ mod nodejs;
 mod notify;
 /// 首次启动环境准备（deploy.yaml、仓库克隆/更新、依赖同步）。
 mod setup;
+mod splash_state;
+/// 旧版 SSE 接口的能力检测。
+mod sse;
 /// 窗口工具（控制台附着状态等平台辅助）。
 mod window_util;
 
@@ -47,7 +50,6 @@ use std::{
     collections::HashMap,
     fs,
     io::{Read, Write},
-    net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -63,7 +65,7 @@ use crate::{
     launcher_control::start_launcher_control_stream,
     notify::{start_notify_stream, NotificationClickHandler},
     setup::{
-        get_deploy_config, rebuild_venv_and_sync_dependencies, reset_venv_for_rebuild,
+        get_deploy_config, rebuild_venv_and_sync_dependencies, repository_is_development_workspace,
         setup_alas_repo, setup_environment, SplashUpdate,
     },
 };
@@ -207,6 +209,21 @@ const TRUST_LOGIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 本次会话的信任密钥缓存：首次调用时生成并全程复用，进程结束即失效。
 static LAUNCHER_TRUST_SECRET: OnceLock<String> = OnceLock::new();
+/// 一次启动期间所有网络路径使用同一份配置，避免重试重新落回 HTTP。
+static WEBUI_LAUNCH_CONFIG: OnceLock<WebuiLaunchConfig> = OnceLock::new();
+
+fn backend_config(port: u16) -> Result<std::borrow::Cow<'static, WebuiLaunchConfig>> {
+    if let Some(config) = WEBUI_LAUNCH_CONFIG.get() {
+        if port != config.port {
+            bail!("Backend port does not match the active launcher configuration");
+        }
+        return Ok(std::borrow::Cow::Borrowed(config));
+    }
+    // 纯函数测试和启动配置登记前的保守默认值。
+    let mut config = WebuiLaunchConfig::from_deploy_config(None);
+    config.port = port;
+    Ok(std::borrow::Cow::Owned(config))
+}
 
 /// 生成（首次）并返回本次会话的启动器信任密钥。
 pub(crate) fn launcher_trust_secret() -> &'static str {
@@ -221,41 +238,40 @@ pub(crate) fn launcher_trust_secret() -> &'static str {
 /// 计算主窗口应导航到的后端地址：若后端支持启动器免密（本机回环 + 密钥匹配），
 /// 则返回带一次性令牌的 /launcher-login 页面；否则回退普通后端首页，维持原有
 /// 登录行为。本函数不抛错，任何失败都静默回退。
-fn webui_navigate_url(port: u16) -> String {
-    let fallback = || backend_url(port);
-    let secret = launcher_trust_secret();
-    let client = match Client::builder()
-        .timeout(TRUST_LOGIN_TIMEOUT)
-        .build()
-    {
+fn webui_navigate_url(port: u16) -> Result<String> {
+    let config = backend_config(port)?;
+    let fallback = config.backend_url()?;
+    let client = match config.http_client(TRUST_LOGIN_TIMEOUT) {
         Ok(client) => client,
-        Err(_) => return fallback(),
+        Err(_) => return Ok(fallback),
     };
     let response = client
-        .post(format!("http://127.0.0.1:{port}/api/launcher/trusted-login"))
-        .header("X-Webui-Launcher-Secret", secret)
+        .post(format!("{fallback}api/launcher/trusted-login"))
+        .header("X-Webui-Launcher-Secret", launcher_trust_secret())
         .send();
     let response = match response {
         Ok(response) if response.status().is_success() => response,
-        _ => return fallback(),
+        _ => return Ok(fallback),
     };
-    // reqwest 未启用 json feature，手动解析 body。
     let body_text = match response.text() {
         Ok(body_text) => body_text,
-        Err(_) => return fallback(),
+        Err(_) => return Ok(fallback),
     };
     let body: serde_json::Value = match serde_json::from_str(&body_text) {
         Ok(body) => body,
-        Err(_) => return fallback(),
+        Err(_) => return Ok(fallback),
     };
-    let Some(token) = body.get("token").and_then(|token| token.as_str()) else {
-        return fallback();
+    let Some(token) = body
+        .get("token")
+        .and_then(|token| token.as_str())
+        .filter(|token| !token.is_empty())
+    else {
+        return Ok(fallback);
     };
-    if token.is_empty() {
-        return fallback();
-    }
-    // 令牌为 URL-safe 随机串（secrets.token_urlsafe），可直接置于 query。
-    format!("http://127.0.0.1:{port}/launcher-login?token={token}")
+    // query_pairs_mut 编码服务端令牌，避免把它当作 URL 语法拼接。
+    let mut url = Url::parse(&fallback)?.join("launcher-login")?;
+    url.query_pairs_mut().append_pair("token", token);
+    Ok(url.to_string())
 }
 
 /// URL 的日志安全形式：只保留 scheme/host/port/path，剔除 query，避免
@@ -263,6 +279,11 @@ fn webui_navigate_url(port: u16) -> String {
 fn redacted_url_log(url: &Url) -> String {
     let Some(host) = url.host_str() else {
         return url.to_string();
+    };
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
     };
     let mut out = format!("{}://{}", url.scheme(), host);
     if let Some(port) = url.port() {
@@ -353,11 +374,8 @@ fn tray_icon_for_platform() -> Image<'static> {
     })
 }
 
-/// 启动中断后的清理入口：提示用户、等待 setup 线程停止后重置 venv 并退出。
-///
-/// 多个退出路径（ExitRequested、splash 关闭）都可能触发，通过
-/// startup_cleanup_started 原子标志保证只执行一次。清理成功后置 allow_exit
-/// 并以退出码 0 结束应用；失败则在 splash 上显示错误并复位标志，允许重试。
+/// 启动取消入口：等待正在使用环境的工作结束，保留现有文件后退出。
+/// 多个退出路径共用幂等保护，绝不在取消时删除运行环境。
 fn begin_startup_cleanup(
     app_handle: tauri::AppHandle,
     allow_exit: Arc<AtomicBool>,
@@ -365,72 +383,35 @@ fn begin_startup_cleanup(
     setup_running: Arc<AtomicBool>,
     startup_cleanup_started: Arc<AtomicBool>,
 ) {
-    // 幂等保护：清理只允许触发一次，后续并发的退出请求直接忽略。
     if startup_cleanup_started
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
         return;
     }
-
-    // 通知 setup 线程尽早取消，避免清理与初始化并发改写环境。
     setup_cancel_requested.store(true, Ordering::SeqCst);
     if let Some(splash) = app_handle.get_webview_window("splash") {
         update_splash(
             &splash,
             &SplashUpdate::loading(
-                t!("dialog.cleaning_env"),
-                t!("dialog.cleaning_env_detail"),
+                t!("dialog.stopping_startup"),
+                t!("dialog.stopping_startup_detail"),
                 99,
-            )
-            .with_subtitle(t!("dialog.cleaning_wait")),
+            ),
         );
     }
 
-    // 弹出说明对话框告知用户"正在清理环境"，此弹窗不阻塞主流程。
-    app_handle
-        .dialog()
-        .message(t!("dialog.cleaning_message"))
-        .title(t!("dialog.cleaning_env"))
-        .show(|_| {});
-
-    // 后台线程执行清理：先等 setup 线程退出（至多 30 秒，100ms 轮询）。
     thread::spawn(move || {
         let started_at = Instant::now();
-        while setup_running.load(Ordering::SeqCst) && started_at.elapsed() < Duration::from_secs(30)
-        {
+        let mut warned = false;
+        while setup_running.load(Ordering::SeqCst) {
+            if !warned && started_at.elapsed() >= Duration::from_secs(30) {
+                warn!("Startup cancellation is taking longer than expected; preserving environment and waiting for owned work to stop");
+                warned = true;
+            }
             thread::sleep(Duration::from_millis(100));
         }
-
-        // 超时仍未退出则记录告警，但继续清理，尽快让进程结束。
-        if setup_running.load(Ordering::SeqCst) {
-            warn!("Setup thread did not stop before startup cleanup timeout");
-        }
-
-        // 重置 venv：下次启动时重新同步依赖，修复可能损坏的运行环境。
-        match reset_venv_for_rebuild() {
-            Ok(()) => {
-                info!("Startup cleanup finished; runtime will be rebuilt on next launch");
-            }
-            Err(e) => {
-                error!("Startup cleanup failed: {:?}", e);
-                if let Some(splash) = app_handle.get_webview_window("splash") {
-                    update_splash(
-                        &splash,
-                        &SplashUpdate::error(
-                            t!("dialog.cleanup_failed"),
-                            t!("dialog.cleanup_failed_detail", error = format!("{e:#}")),
-                            99,
-                        ),
-                    );
-                }
-                // 清理失败：复位标志允许再次触发，不放行退出。
-                startup_cleanup_started.store(false, Ordering::SeqCst);
-                return;
-            }
-        }
-
-        // 清理完成后放行退出并结束进程。
+        info!("Startup cancelled; existing runtime environment preserved");
         allow_exit.store(true, Ordering::SeqCst);
         app_handle.exit(0);
     });
@@ -582,7 +563,6 @@ fn launcher_update_http_client(
     // 15 秒连接超时兜底；整体超时由调用方按用途传入。
     let mut builder = Client::builder()
         .connect_timeout(Duration::from_secs(15))
-        .no_proxy()
         .default_headers(launcher_update_browser_headers());
     // 仅请求更新载荷时携带 mTLS 身份；清单是公开数据，无需证书。
     if with_mtls_identity && !LAUNCHER_UPDATE_MTLS_IDENTITY.is_empty() {
@@ -617,6 +597,7 @@ fn fetch_launcher_update_manifest_from_urls(
     urls: &[&str],
 ) -> Result<LauncherUpdateManifest> {
     let mut failures = Vec::new();
+    let mut all_unavailable = !urls.is_empty();
 
     for (index, url) in urls.iter().enumerate() {
         // 跳过重复 URL（主备地址可能配置成同一个）。
@@ -633,15 +614,53 @@ fn fetch_launcher_update_manifest_from_urls(
             }
             Err(error) => {
                 warn!("Unable to fetch launcher update manifest from {url}: {error:#}");
+                all_unavailable &= error.chain().any(|cause| {
+                    cause.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+                        error.is_connect()
+                            || error.is_timeout()
+                            || error
+                                .status()
+                                .is_some_and(|status| status.is_server_error())
+                    })
+                });
                 failures.push(format!("{url}: {error:#}"));
             }
         }
     }
 
-    bail!(
+    let detail = format!(
         "Unable to fetch launcher update manifest from all configured URLs: {}",
         failures.join("; ")
-    )
+    );
+    if all_unavailable {
+        Err(LauncherUpdateUnavailable(detail).into())
+    } else {
+        Err(anyhow!(detail))
+    }
+}
+
+/// 只有更新源暂不可达可以离线继续；坏清单或坏载荷仍然报告错误。
+#[derive(Debug)]
+struct LauncherUpdateUnavailable(String);
+
+impl std::fmt::Display for LauncherUpdateUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for LauncherUpdateUnavailable {}
+
+fn can_continue_without_launcher_update(error: &anyhow::Error, version: &str, root: &Path) -> bool {
+    let python = if cfg!(windows) {
+        ".venv/Scripts/python.exe"
+    } else {
+        ".venv/bin/python"
+    };
+    !launcher_version_is_mini(version)
+        && error.downcast_ref::<LauncherUpdateUnavailable>().is_some()
+        && root.join("gui.py").is_file()
+        && root.join(python).is_file()
 }
 
 /// 从单个 URL 拉取并解析启动器更新清单 JSON。
@@ -702,10 +721,8 @@ fn check_launcher_update_and_restart(mut status_updater: impl FnMut(SplashUpdate
     let manifest = match fetch_launcher_update_manifest(&manifest_client) {
         Ok(manifest) => manifest,
         Err(err) => {
-            return Err(anyhow!(t!(
-                "launcher_update.check_failed",
-                error = format!("{err:#}")
-            )));
+            let detail = format!("{err:#}");
+            return Err(err.context(t!("launcher_update.check_failed", error = detail).to_string()));
         }
     };
     let update_available = launcher_version_is_newer(current_version, &manifest.version)
@@ -1823,6 +1840,92 @@ fn path_to_wide(path: &Path) -> Vec<u16> {
 mod tests {
     use super::*;
 
+    fn manifest_fixture_error(status: &str, body: &str) -> anyhow::Error {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 4096];
+            stream.read(&mut request).unwrap();
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let url = format!("http://{address}/manifest");
+        let error = fetch_launcher_update_manifest_from_urls(&client, &[&url]).unwrap_err();
+        server.join().unwrap();
+        error
+    }
+
+    #[test]
+    fn installed_backend_can_start_when_update_service_is_unavailable() {
+        let root = TempDirBuilder::new().tempdir().unwrap();
+        fs::write(root.path().join("gui.py"), "# fixture").unwrap();
+        let python = if cfg!(windows) {
+            ".venv/Scripts/python.exe"
+        } else {
+            ".venv/bin/python"
+        };
+        let python = root.path().join(python);
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::write(python, "fixture").unwrap();
+        let unavailable =
+            manifest_fixture_error("503 Service Unavailable", "offline").context("update check");
+        assert!(can_continue_without_launcher_update(
+            &unavailable,
+            "2.2.4",
+            root.path()
+        ));
+        assert!(!can_continue_without_launcher_update(
+            &unavailable,
+            "0.0.1",
+            root.path()
+        ));
+        let broken_manifest = manifest_fixture_error("200 OK", "{broken json");
+        assert!(!can_continue_without_launcher_update(
+            &broken_manifest,
+            "2.2.4",
+            root.path()
+        ));
+        assert!(!can_continue_without_launcher_update(
+            &anyhow!("sha256 mismatch"),
+            "2.2.4",
+            root.path()
+        ));
+        fs::remove_file(root.path().join("gui.py")).unwrap();
+        assert!(!can_continue_without_launcher_update(
+            &unavailable,
+            "2.2.4",
+            root.path()
+        ));
+    }
+
+    #[test]
+    fn redacted_navigation_url_preserves_ipv6_and_removes_secrets() {
+        let url = Url::parse("https://[::1]:22267/launcher-login?token=private#fragment").unwrap();
+        assert_eq!(redacted_url_log(&url), "https://[::1]:22267/launcher-login");
+        assert!(is_backend_url(
+            &Url::parse("http://127.0.0.1:22267/tasks").unwrap(),
+            22267
+        ));
+        assert!(!is_backend_url(
+            &Url::parse("http://127.0.0.1:22268/tasks").unwrap(),
+            22267
+        ));
+        assert!(!is_backend_url(
+            &Url::parse("https://example.com:22267/tasks").unwrap(),
+            22267
+        ));
+    }
+
     /// 时间炸弹段 enabled 时应能解析出配置（且与 enabled 值一致）。
     #[test]
     fn test_time_bomb_config_parses_when_enabled() {
@@ -1847,7 +1950,6 @@ mod tests {
 
     /// backend_unready_error 携带日志失败原因时拼接展示，无原因时保持原样。
     #[test]
-    #[test]
     fn backend_unready_error_carries_the_reason_from_the_log() {
         let with_reason = backend_unready_error(
             anyhow!("connect failed"),
@@ -1860,6 +1962,7 @@ mod tests {
     }
 
     /// 英文环境下 splash HTML 的文案应来自 JSON 字面量（而非 JS 单引号拼接）。
+    #[test]
     fn test_english_splash_i18n_uses_json_literals() {
         rust_i18n::set_locale("en");
 
@@ -2409,7 +2512,16 @@ fn main() -> Result<()> {
     // 解析预览与最小化启动参数（测试/演示用）。
     let preview_crash = preview_crash_arg_present();
     let preview_no_update = preview_crash || preview_no_update_arg_present();
-    let start_minimized = start_minimized_arg_present();
+    let start_minimized_requested = start_minimized_arg_present();
+    let start_minimized = start_minimized_requested && !cfg!(target_os = "linux");
+    if start_minimized_requested && !start_minimized {
+        info!("Ignoring --start-minimized on Linux because this launcher has no system tray");
+    }
+    let preserve_workspace =
+        preview_no_update || repository_is_development_workspace(Path::new("."));
+    if preserve_workspace && !preview_no_update {
+        info!("Development checkout detected; skipping launcher and repository release updates");
+    }
 
     info!("=== AzurPilot starting ===");
     info!("Launcher log file: log/{}", today_launcher_log_filename());
@@ -2429,6 +2541,11 @@ fn main() -> Result<()> {
     if deploy_config.is_none() {
         warn!("config/deploy.yaml not found or invalid, using default WebUI launch config");
     }
+    // 固定 scheme/host/port；无效 TLS 配置在任何后端启动前返回明确错误。
+    webui_config.backend_url()?;
+    WEBUI_LAUNCH_CONFIG
+        .set(webui_config.clone())
+        .map_err(|_| anyhow!("WebUI configuration already initialized"))?;
     let port = webui_config.port;
 
     // 各线程共享的运行状态：后端句柄与一组生命周期标志
@@ -2460,8 +2577,10 @@ fn main() -> Result<()> {
         .register_uri_scheme_protocol("alas-splash", |_ctx, _request| splash_response())
         // 注册前端可调用的 Tauri 命令：文件保存、日志下载、窗口控制等。
         .manage(ExitControl(allow_exit.clone()))
+        .manage(splash_state::SplashState::default())
         .invoke_handler(tauri::generate_handler![
             save_as,
+            splash_ready,
             download_today_gui_log,
             download_today_launcher_log,
             retry_backend_connection,
@@ -2640,9 +2759,10 @@ fn main() -> Result<()> {
                     let setup_completed = setup_completed.clone();
                     let recreating_main_window_for_notify = recreating_main_window_for_run.clone();
                     let start_minimized = start_minimized_for_run;
+                    // 在调度线程前登记运行状态，避免关闭事件误认为没有待取消工作。
+                    setup_running.store(true, Ordering::SeqCst);
                     // 完整启动流程放在后台线程执行，避免阻塞 Tauri 事件循环。
                     thread::spawn(move || {
-                        setup_running.store(true, Ordering::SeqCst);
                         // splash 由 tauri.conf.json 静态声明，此处必然能取到。
                         let splash = app_handle.get_webview_window("splash").unwrap();
                         initialize_splash(&splash, !start_minimized);
@@ -2668,7 +2788,7 @@ fn main() -> Result<()> {
                         );
 
                         // 启动器自更新检查：成功替换重启时直接退出本进程交棒新版本。
-                        if !preview_no_update {
+                        if !preserve_workspace {
                             // 自更新的进度单独记一条"历史最高"，与主流程互不回退。
                             let launcher_progress = Cell::new(0u8);
                             let mut launcher_status_updater = |mut update: SplashUpdate| {
@@ -2687,6 +2807,9 @@ fn main() -> Result<()> {
                                     return;
                                 }
                                 Ok(false) => {}
+                                Err(e) if can_continue_without_launcher_update(&e, env!("CARGO_PKG_VERSION"), Path::new(".")) => {
+                                    warn!("Launcher update service unavailable; continuing with installed launcher: {e:#}");
+                                }
                                 Err(e) => {
                                     warn!("Required launcher update failed: {e:#}");
                                     if start_minimized {
@@ -2739,6 +2862,7 @@ fn main() -> Result<()> {
                             &setup_cancel_requested,
                             start_minimized,
                         ) {
+                            setup_completed.store(true, Ordering::SeqCst);
                             setup_running.store(false, Ordering::SeqCst);
                             return;
                         }
@@ -2751,9 +2875,10 @@ fn main() -> Result<()> {
                         if let Err(e) = setup_alas_repo(
                             &mut status_updater,
                             setup_cancel_requested.clone(),
-                            preview_no_update,
+                            preserve_workspace,
                         ) {
                             error!("{e}");
+                            setup_completed.store(true, Ordering::SeqCst);
                             setup_running.store(false, Ordering::SeqCst);
                             if setup_cancel_requested.load(Ordering::SeqCst) {
                                 return;
@@ -2768,7 +2893,11 @@ fn main() -> Result<()> {
                             ));
                             return;
                         }
-                        info!("Starting gui.py on http://127.0.0.1:{}/", port);
+                        if setup_cancel_requested.load(Ordering::SeqCst) {
+                            setup_running.store(false, Ordering::SeqCst);
+                            return;
+                        }
+                        info!("Starting gui.py on configured port {}", port);
                         status_updater(
                             SplashUpdate::loading(
                                 t!("splash.starting"),
@@ -2784,10 +2913,12 @@ fn main() -> Result<()> {
                         // 后端启动循环：启动超时且未恢复过时，重建 venv 并重试一次。
                         let mut backend_recovery_used = false;
                         let backend_result = loop {
-                            match ManagedBackend::new(&webui_config) {
+                            match ManagedBackend::new(&webui_config, &setup_cancel_requested) {
                                 Ok(backend) => break Ok(backend),
                                 Err(error)
                                     if !backend_recovery_used
+                                        && !preserve_workspace
+                                        && webui_config.ssl_key.is_none()
                                         && is_backend_startup_timeout(&error) =>
                                 {
                                     backend_recovery_used = true;
@@ -2801,6 +2932,7 @@ fn main() -> Result<()> {
                                     if let Err(recovery_error) = rebuild_venv_and_sync_dependencies(
                                         &mut status_updater,
                                         setup_cancel_requested.clone(),
+                                        preserve_workspace,
                                     ) {
                                         break Err(recovery_error.context(
                                             "Failed to rebuild .venv after backend startup timeout",
@@ -2808,7 +2940,7 @@ fn main() -> Result<()> {
                                     }
 
                                     info!(
-                                        "Retrying gui.py after rebuilding dependencies on http://127.0.0.1:{port}/"
+                                        "Retrying gui.py after rebuilding dependencies on configured port {port}"
                                     );
                                     status_updater(
                                         SplashUpdate::loading(
@@ -2830,6 +2962,7 @@ fn main() -> Result<()> {
                             Ok(backend) => backend,
                             Err(e) => {
                                 error!("{e}");
+                                setup_completed.store(true, Ordering::SeqCst);
                                 setup_running.store(false, Ordering::SeqCst);
                                 if setup_cancel_requested.load(Ordering::SeqCst) {
                                     return;
@@ -2845,6 +2978,12 @@ fn main() -> Result<()> {
                                 return;
                             }
                         };
+                        // 就绪与取消可能同时发生；先回收局部句柄再放行取消线程。
+                        if setup_cancel_requested.load(Ordering::SeqCst) {
+                            drop(b);
+                            setup_running.store(false, Ordering::SeqCst);
+                            return;
+                        }
                         // 后端句柄存入共享状态，退出时统一 terminate。
                         *backend.lock().unwrap() = Some(b);
                         // 通知点击回调：唤起主窗口（可能在任意线程触发，需调度）。
@@ -2863,11 +3002,11 @@ fn main() -> Result<()> {
                         // 与退出指令。
                         start_notify_stream(
                             app_handle.clone(),
-                            port,
+                            webui_config.clone(),
                             allow_exit.clone(),
                             notification_click,
                         );
-                        start_launcher_control_stream(port, allow_exit.clone());
+                        start_launcher_control_stream(webui_config.clone(), allow_exit.clone());
                         status_updater(
                             SplashUpdate::loading(t!("splash.opening"), t!("splash.ready"), 100)
                                 .with_subtitle(format!(
@@ -3003,12 +3142,13 @@ fn main() -> Result<()> {
                         }
                     }
 
-                    // Linux：直接隐藏窗口（不弹确认）。
+                    // Linux 没有托盘；关闭主窗口应退出，避免隐藏后无法恢复。
                     #[cfg(target_os = "linux")]
                     {
                         if label == "main" && !allow_exit.load(Ordering::SeqCst) {
                             api.prevent_close();
-                            minimize_main_window_to_tray(&app_handle);
+                            allow_exit.store(true, Ordering::SeqCst);
+                            app_handle.exit(0);
                             return;
                         }
                     }
@@ -3079,10 +3219,12 @@ fn save_as(app_handle: tauri::AppHandle, filename: &str, data: &str) {
             .set_file_name(filename)
             .save_file(move |path| {
                 let result: Result<()> = (move || {
-                    let file_path = path
-                        .as_ref()
-                        .and_then(FilePath::as_path)
-                        .ok_or_else(|| anyhow!(t!("errors.invalid_file_path", path = format!("{:?}", &path))))?;
+                    let file_path = path.as_ref().and_then(FilePath::as_path).ok_or_else(|| {
+                        anyhow!(t!(
+                            "errors.invalid_file_path",
+                            path = format!("{:?}", &path)
+                        ))
+                    })?;
                     fs::write(file_path, &decoded_data)?;
                     info!("Saved file to {:?}", file_path);
                     Ok(())
@@ -3143,10 +3285,12 @@ fn download_log_file(
         .save_file(move |path| {
             let log_name_for_save = log_name.clone();
             let result: Result<()> = (move || {
-                let file_path = path
-                    .as_ref()
-                    .and_then(FilePath::as_path)
-                    .ok_or_else(|| anyhow!(t!("errors.invalid_file_path", path = format!("{:?}", &path))))?;
+                let file_path = path.as_ref().and_then(FilePath::as_path).ok_or_else(|| {
+                    anyhow!(t!(
+                        "errors.invalid_file_path",
+                        path = format!("{:?}", &path)
+                    ))
+                })?;
                 fs::write(file_path, &data)?;
                 info!("Saved {} log to {:?}", log_name_for_save, file_path);
                 Ok(())
@@ -3173,6 +3317,10 @@ fn today_launcher_log_filename() -> String {
 /// 关闭选择菜单的"最小化到托盘"选项均调用此命令）。
 #[tauri::command]
 fn window_hide(app_handle: tauri::AppHandle) -> tauri::Result<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(window) = app_handle.get_webview_window("main") {
+        return window.minimize();
+    }
     minimize_main_window_to_tray(&app_handle);
     Ok(())
 }
@@ -3245,7 +3393,7 @@ async fn retry_backend_connection(
         if wait_for_backend_connection(port, BACKEND_NAVIGATION_TIMEOUT).is_err() {
             return None;
         }
-        Some(webui_navigate_url(port))
+        webui_navigate_url(port).ok()
     })
     .await
     .map_err(|e| {
@@ -3316,66 +3464,57 @@ __ALAS_TITLEBAR_SCRIPT__
     }
 }
 
-/// 初始化 splash 窗口：导航到 alas-splash:// 页面，等待页面脚本就绪后按需
-/// 显示窗口。就绪探测超时也照样显示，保证用户总能看到启动画面。
+/// 页面在注册更新回调后通过 IPC 确认就绪，并重放最新进度。
+#[tauri::command]
+fn splash_ready(
+    window: WebviewWindow,
+    state: tauri::State<'_, splash_state::SplashState>,
+) -> Result<(), String> {
+    if window.label() != "splash" {
+        return Err("Only the splash window may acknowledge readiness".into());
+    }
+    state.acknowledge(|payload| dispatch_splash_update(&window, payload));
+    Ok(())
+}
+
+/// 导航前关闭推送；页面自身的 IPC 握手负责重放导航期间的最新状态。
 fn initialize_splash(splash: &WebviewWindow, show_window: bool) {
+    splash.state::<splash_state::SplashState>().reset();
     match Url::parse(SPLASH_URL) {
         Ok(url) => {
             if let Err(e) = splash.navigate(url) {
                 error!("Failed to navigate splash page: {:?}", e);
             }
-            if !wait_for_splash_ready(splash, Duration::from_secs(2)) {
-                warn!("Timed out waiting for splash page readiness; showing splash anyway");
-            }
-            // show_window 为 false 对应最小化启动：先不显示，等后端就绪再唤起。
             if show_window {
                 if let Err(e) = splash.show() {
                     error!("Failed to show splash window: {:?}", e);
                 }
             }
         }
-        Err(e) => {
-            error!("Failed to parse splash URL: {:?}", e);
-        }
+        Err(e) => error!("Failed to parse splash URL: {:?}", e),
     }
 }
 
-/// 轮询探测 splash 页面是否就绪：执行一段检查 __ALAS_SPLASH_READY 标志的
-/// JS，eval 成功即认为页面的更新回调已挂好、可以接收进度推送。
-fn wait_for_splash_ready(splash: &WebviewWindow, timeout: Duration) -> bool {
-    let started_at = Instant::now();
-    while started_at.elapsed() < timeout {
-        if splash
-            .eval(
-                r#"
-                if (!window.__ALAS_SPLASH_READY) {
-                    throw new Error("splash page is not ready");
-                }
-                "#,
-            )
-            .is_ok()
-        {
-            return true;
-        }
-        // 25ms 轮询：足够灵敏且不给 WebView 造成明显压力。
-        thread::sleep(Duration::from_millis(25));
-    }
-    false
-}
-
-/// 把 SplashUpdate 序列化为 JSON 并调用 splash 页面的
-/// window.__ALAS_SPLASH_UPDATE 回调刷新界面。
+/// 每条更新先缓存；只有页面确认回调存在后才向 WebView 推送。
 fn update_splash(splash: &WebviewWindow, update: &SplashUpdate) {
     let payload = to_string(update).unwrap();
-    let script = format!("window.__ALAS_SPLASH_UPDATE && window.__ALAS_SPLASH_UPDATE({payload});");
+    splash
+        .state::<splash_state::SplashState>()
+        .update(payload, |payload| {
+            dispatch_splash_update(splash, payload);
+        });
+}
+
+fn dispatch_splash_update(splash: &WebviewWindow, payload: &str) {
+    let script = format!("window.__ALAS_SPLASH_UPDATE({payload});");
     if let Err(e) = splash.eval(&script) {
         error!("Failed to update splash page: {:?}", e);
     }
 }
 
-/// 拼接后端 WebUI 的本地地址（http://127.0.0.1:{port}/）。
-fn backend_url(port: u16) -> String {
-    format!("http://127.0.0.1:{port}/")
+/// 获取本次启动配置中的后端地址，保留 HTTPS 和 IPv6。
+fn backend_url(port: u16) -> Result<String> {
+    backend_config(port)?.backend_url()
 }
 
 /// 构造 alas-splash:// 协议的 HTML 响应：视频背景与字体以 base64 内嵌，
@@ -3392,21 +3531,26 @@ fn splash_response() -> tauri::http::Response<Vec<u8>> {
         .unwrap()
 }
 
-/// 用一次 TCP 连接探测后端端口是否可达。
+/// 用实际 HTTP(S) 请求探测后端是否可达，验证 TLS 证书。
 ///
 /// # Errors
-/// 地址解析失败或连接超时（BACKEND_CONNECT_TIMEOUT）时返回 Err。
+/// 地址无效、证书验证失败、HTTP 错误或连接超时时返回 Err。
 fn check_backend_connection(port: u16) -> Result<()> {
-    let address: SocketAddr = format!("127.0.0.1:{port}").parse()?;
-    TcpStream::connect_timeout(&address, BACKEND_CONNECT_TIMEOUT)
+    let config = backend_config(port)?;
+    let url = config.backend_url()?;
+    config
+        .http_client(BACKEND_CONNECT_TIMEOUT)?
+        .get(&url)
+        .send()
+        .and_then(|response| response.error_for_status())
         .map(|_| ())
         .map_err(|e| {
-        anyhow!(t!(
-            "errors.backend_unreachable",
-            address = address.to_string(),
-            error = e.to_string()
-        ))
-    })
+            anyhow!(t!(
+                "errors.backend_unreachable",
+                address = url,
+                error = e.to_string()
+            ))
+        })
 }
 
 /// 未就绪提示与日志中的失败原因合成最终错误：日志里写了原因时一并带出。
@@ -3459,7 +3603,7 @@ fn wait_for_backend_connection(port: u16, timeout: Duration) -> Result<()> {
 fn navigate_backend_or_error(window: &WebviewWindow, port: u16) -> Result<bool> {
     match wait_for_backend_connection(port, BACKEND_NAVIGATION_TIMEOUT) {
         Ok(()) => {
-            let url = webui_navigate_url(port);
+            let url = webui_navigate_url(port)?;
             window.navigate(Url::parse(&url)?)?;
             Ok(true)
         }
@@ -3565,11 +3709,12 @@ fn handle_backend_navigation(app: tauri::AppHandle, port: u16, url: &Url) -> boo
     }
 }
 
-/// 判断 URL 是否指向本地后端：http/https + 127.0.0.1/localhost + 目标端口。
+/// 判断 URL 是否属于本次后端配置的同一来源（scheme、host、port）。
 fn is_backend_url(url: &Url, port: u16) -> bool {
-    matches!(url.scheme(), "http" | "https")
-        && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
-        && url.port_or_known_default() == Some(port)
+    backend_url(port)
+        .ok()
+        .and_then(|base| Url::parse(&base).ok())
+        .is_some_and(|base| base.origin() == url.origin())
 }
 
 /// 转义 HTML 特殊字符（& < > " '），用于把本地化文案安全嵌入 HTML。
@@ -3589,7 +3734,8 @@ fn escape_html(input: impl AsRef<str>) -> String {
 /// 按钮（页面 JS 每秒自动重试一次）、GUI/启动器日志下载按钮。标题栏脚本
 /// 同样注入，保持无边框窗口可拖拽；本地化文案以 JSON 注入前端。
 fn backend_error_html(port: u16, error_detail: &str) -> String {
-    let backend_url_json = to_string(&backend_url(port)).unwrap();
+    let backend_url_json =
+        to_string(&backend_url(port).unwrap_or_else(|error| error.to_string())).unwrap();
     let error_detail_json = to_string(error_detail).unwrap();
     let mi_sans_font_b64 = BASE64_STANDARD.encode(MI_SANS_FONT);
     let splash_video_b64 = BASE64_STANDARD.encode(SPLASH_BG_VIDEO);
@@ -4744,6 +4890,11 @@ fn splash_redesigned_shell_html(video_bg_b64: &str, mi_sans_font_b64: &str) -> S
     });
 
     window.__ALAS_SPLASH_READY = true;
+    if (typeof invoke === 'function') {
+      invoke('splash_ready').catch(error => {
+        console.error('Failed to acknowledge splash readiness', error);
+      });
+    }
   </script>
 </body>
 </html>"#

@@ -1,6 +1,6 @@
 //! 桌面通知模块：订阅后端的 SSE 通知流，并把事件转发为平台原生通知。
-//! `start_notify_stream` 在独立线程中维持对 `http://127.0.0.1:{port}/api/notify_stream`
-//! 的长连接，断线后固定间隔 3 秒重连，直到 `allow_exit` 置位；分发层按平台
+//! `start_notify_stream` 依据后端 HTTP/HTTPS 配置订阅 `/api/notify_stream`，
+//! 仅对真实事件流重连；缺少旧接口的后端停止订阅。分发层按平台
 //! 选择通知后端——Windows 用 tauri-winrt-notification（Toast），Linux 用
 //! notify-rust，macOS 等其余平台用 tauri-plugin-notification；由 main.rs 在后端就绪后启用。
 
@@ -20,7 +20,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{anyhow, Result};
+#[cfg(windows)]
+use anyhow::anyhow;
+use anyhow::Result;
 #[cfg(target_os = "linux")]
 use notify_rust::{Hint, Notification};
 use reqwest::blocking::Client;
@@ -30,6 +32,11 @@ use serde::Deserialize;
 #[cfg(all(not(windows), not(target_os = "linux")))]
 use tauri_plugin_notification::NotificationExt;
 use tracing::{debug, info, warn};
+
+use crate::{
+    backend::WebuiLaunchConfig,
+    sse::{self, StreamOutcome},
+};
 
 /// 通知被点击时执行的回调。
 ///
@@ -108,17 +115,22 @@ enum NotificationType {
 /// 均在此线程内静默重连，不影响启动器其他功能。
 pub fn start_notify_stream(
     app: tauri::AppHandle,
-    port: u16,
+    config: WebuiLaunchConfig,
     allow_exit: Arc<AtomicBool>,
     on_click: NotificationClickHandler,
 ) {
     thread::spawn(move || {
-        let url = format!("http://127.0.0.1:{port}/api/notify_stream");
+        let url = match config.backend_url() {
+            Ok(base) => format!("{}api/notify_stream", base),
+            Err(e) => {
+                warn!("Invalid notification backend configuration: {e}");
+                return;
+            }
+        };
         // 连接超时 5 秒并绕过系统代理：目标是本机回环地址，走代理只会添乱。
-        let client = match Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .no_proxy()
-            .build()
+        let client = match config
+            .http_client_builder()
+            .and_then(|builder| Ok(builder.connect_timeout(Duration::from_secs(5)).build()?))
         {
             Ok(client) => client,
             Err(e) => {
@@ -132,12 +144,16 @@ pub fn start_notify_stream(
         while !allow_exit.load(Ordering::SeqCst) {
             info!("Connecting to notify stream: {url}");
             match read_notify_stream(&client, &url, &app, &allow_exit, &on_click) {
-                Ok(()) => debug!("Notify stream ended"),
+                Ok(StreamOutcome::Ended) => debug!("Notify stream ended"),
+                Ok(StreamOutcome::Unsupported) => {
+                    info!("Backend does not provide the legacy desktop notification stream; subscription stopped");
+                    return;
+                }
                 Err(e) => warn!("Notify stream disconnected: {e}"),
             }
 
             if !allow_exit.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_secs(3));
+                sse::wait_to_reconnect(&allow_exit);
             }
         }
     });
@@ -158,12 +174,12 @@ fn read_notify_stream(
     app: &tauri::AppHandle,
     allow_exit: &AtomicBool,
     on_click: &NotificationClickHandler,
-) -> Result<()> {
+) -> Result<StreamOutcome> {
     // SSE 协议要求客户端声明 Accept: text/event-stream，后端据此返回流式响应。
     let response = client.get(url).header(ACCEPT, "text/event-stream").send()?;
 
-    if !response.status().is_success() {
-        return Err(anyhow!("server returned {}", response.status()));
+    if !sse::is_event_stream(&response)? {
+        return Ok(StreamOutcome::Unsupported);
     }
 
     // SSE 以空行作为一条事件（message）的边界，因此逐行缓冲读取。
@@ -193,7 +209,7 @@ fn read_notify_stream(
 
     // 退出前把未跟随空行的残余数据也分发一次，避免丢失最后一条通知。
     dispatch_sse_data(&mut data_lines, app, on_click);
-    Ok(())
+    Ok(StreamOutcome::Ended)
 }
 
 /// 把一条 SSE 事件的 `data` 行集合还原为 JSON 并展示为桌面通知。
@@ -216,7 +232,7 @@ fn dispatch_sse_data(
     // 拖垮整条通知流。
     match serde_json::from_str::<NotifyPayload>(&data) {
         Ok(payload) => show_notification(app, payload, on_click),
-        Err(e) => warn!("Ignoring invalid notify payload: {e}; payload={data}"),
+        Err(e) => warn!("Ignoring invalid notify payload: {e}"),
     }
 }
 

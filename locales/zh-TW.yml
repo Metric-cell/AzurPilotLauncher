@@ -92,6 +92,8 @@ launcher_update:
   payload_missing: "啟動器必須更新，但更新伺服器沒有提供 %{platform} 的安裝包。"
 
 dialog:
+  stopping_startup: "正在停止啟動"
+  stopping_startup_detail: "正在等待啟動工作結束，現有 Python 環境將保留。"
   cleaning_env: "正在清理環境"
   cleaning_env_detail: "正在移除未完成的啟動環境，下次啟動會自動完全重建。"
   cleaning_wait: "請稍候，不要手動刪除檔案。"
@@ -167,6 +169,12 @@ autostart:
   set_failed: "設定開機自動啟動失敗：%{error}"
 
 errors:
+  backend_startup_cancelled: "後端啟動已取消。"
+  backend_tls_failed: "無法驗證後端 HTTPS 憑證，請檢查憑證信任及主機名稱：%{error}"
+  workspace_protected: "偵測到本機開發修改，已停止發行更新；請使用 --skip-update 或獨立發行目錄。"
+  backend_port_in_use: "後端位址 %{host}:%{port} 已被佔用或無法監聽，請關閉衝突服務或更改連接埠：%{error}"
+  backend_invalid_tls: "HTTPS 必須同時設定 WebuiSSLKey 和 WebuiSSLCert。"
+  backend_invalid_port: "WebUI 連接埠必須介於 1 到 65535。"
   uv_not_found: "啟動器未內建 uv，且系統 PATH 中找不到 uv"
   write_uv_failed: "寫入內建 uv 到 %{path} 失敗"
   requests_install_failed: "安裝 deploy 基礎依賴 requests 失敗"

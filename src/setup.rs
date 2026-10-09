@@ -7,7 +7,7 @@
 //! - 经 git 拉取最新仓库代码（`git_update`，最多重试 20 次）；
 //! - 按 `uv.lock` 同步 Python 依赖（`uv_sync_project`）；
 //! - 迁移与校验 `config/deploy.yaml` 部署配置（`migrate_dependency_config`）；
-//! - 清理可重建的运行时状态（`.venv`、缓存）用于故障恢复。
+//! - 普通发行环境在后端超时后可重建 `.venv`；取消启动保留已有环境。
 //!
 //! 阶段进度通过 [`SplashUpdate`] 回调上报启动画面；所有长时间操作均支持
 //! 经 `cancel_requested` 原子标志请求取消。
@@ -449,15 +449,12 @@ fn refresh_git_environment() {
 /// Linux 专用：探测系统 CA 证书并配置给 git。
 ///
 /// 内嵌 git 无法自动找到发行版的 CA 证书，git 拉取 HTTPS 仓库会失败；
-/// 此处经 openssl-probe 定位证书文件，同时写入进程环境与仓库本地配置。
+/// 此处经 openssl-probe 定位证书文件，仅写进程环境，不修改开发仓库配置。
 #[cfg(target_os = "linux")]
 fn setup_git_ca_bundle() {
     let cert_file = openssl_probe::probe().cert_file;
     if let Some(file) = cert_file.as_ref().and_then(|f| f.to_str()) {
         std::env::set_var("GIT_SSL_CAINFO", file);
-        let _ = Command::new("git")
-            .args(["config", "--local", "http.sslCAInfo", file])
-            .status();
     }
 }
 
@@ -469,12 +466,62 @@ fn setup_git_ca_bundle() {
 /// # Errors
 /// 任一阶段失败（下载、更新、同步、配置迁移）或用户取消时返回 Err，
 /// 由 main.rs 决定展示错误页面。
+/// Protect source checkouts before any deployment configuration or lockfile writes.
+/// A checkout is publishable only when its configured branch has no local work
+/// and HEAD is an ancestor of the corresponding remote tracking ref.
+pub fn repository_is_development_workspace(root: &Path) -> bool {
+    if !root.join(".git").exists() {
+        return false;
+    }
+    if root.join(".git").is_file() {
+        return true;
+    }
+    let git = if root.join(platform_git_config_path()).is_file() {
+        root.join(platform_git_config_path())
+    } else {
+        PathBuf::from("git")
+    };
+    let output = |args: &[&str]| -> Option<String> {
+        let result = Command::new(&git)
+            .current_dir(root)
+            .args(args)
+            .create_no_window()
+            .output()
+            .ok()?;
+        result
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&result.stdout).trim().to_owned())
+    };
+    let config = fs::read_to_string(root.join("config/deploy.yaml"))
+        .unwrap_or_else(|_| default_deploy_config().to_owned());
+    let config: JsonValue = match serde_yaml::from_str(&config) {
+        Ok(config) => config,
+        Err(_) => return true,
+    };
+    let Some(branch) = config
+        .pointer("/Deploy/Git/Branch")
+        .and_then(JsonValue::as_str)
+    else {
+        return true;
+    };
+    if output(&["symbolic-ref", "--quiet", "--short", "HEAD"]).as_deref() != Some(branch)
+        || output(&["status", "--porcelain", "--untracked-files=normal"]).as_deref() != Some("")
+    {
+        return true;
+    }
+    let remote = format!("refs/remotes/origin/{branch}");
+    output(&["merge-base", "--is-ancestor", "HEAD", &remote]).is_none()
+}
+
 pub fn setup_alas_repo(
     mut status_updater: impl FnMut(SplashUpdate),
     cancel_requested: Arc<AtomicBool>,
     skip_repository_update: bool,
 ) -> Result<()> {
     info!("Starting setup for AzurPilot repository...");
+    let mut protect_workspace =
+        skip_repository_update || repository_is_development_workspace(Path::new("."));
     // Linux 的内嵌 git 需要显式指定 CA 证书，必须最先配置
     #[cfg(target_os = "linux")]
     setup_git_ca_bundle();
@@ -489,10 +536,17 @@ pub fn setup_alas_repo(
     );
     let bootstrap_uv = bootstrap_uv_path()?;
     ensure_runtime_tools(&bootstrap_uv, &cancel_requested, &mut status_updater)?;
-    atomic_failure_cleanup("./config", &cancel_requested)?;
-    migrate_dependency_config()?;
-    if skip_repository_update {
-        info!("Skipping AzurPilot repository update because preview no-update mode is enabled");
+    protect_workspace |= repository_is_development_workspace(Path::new("."));
+    if !protect_workspace {
+        atomic_failure_cleanup("./config", &cancel_requested)?;
+        protect_workspace |= repository_is_development_workspace(Path::new("."));
+    }
+    if !protect_workspace {
+        migrate_dependency_config()?;
+    }
+    protect_workspace |= repository_is_development_workspace(Path::new("."));
+    if protect_workspace {
+        info!("Skipping repository update and configuration writes to preserve local workspace");
         status_updater(
             SplashUpdate::loading(
                 t!("setup.skipping_update"),
@@ -508,11 +562,17 @@ pub fn setup_alas_repo(
         );
         git_update(&mut status_updater, &bootstrap_uv, &cancel_requested)?;
     }
+    protect_workspace |= repository_is_development_workspace(Path::new("."));
     status_updater(
         SplashUpdate::loading(t!("setup.installing_deps"), t!("setup.verifying_deps"), 64)
             .with_subtitle(t!("setup.syncing_deps", tip = get_tip())),
     );
-    uv_sync_project(&mut status_updater, &bootstrap_uv, &cancel_requested)?;
+    uv_sync_project_with_protection(
+        &mut status_updater,
+        &bootstrap_uv,
+        &cancel_requested,
+        protect_workspace,
+    )?;
     status_updater(
         SplashUpdate::loading(t!("setup.finishing"), t!("setup.ready_to_launch"), 94)
             .with_subtitle(t!("setup.launching", tip = get_tip())),
@@ -530,6 +590,7 @@ pub fn setup_alas_repo(
 pub fn rebuild_venv_and_sync_dependencies(
     mut status_updater: impl FnMut(SplashUpdate),
     cancel_requested: Arc<AtomicBool>,
+    preserve_workspace: bool,
 ) -> Result<()> {
     if cancel_requested.load(Ordering::SeqCst) {
         bail!(t!("setup.cancel_cleaning"));
@@ -555,7 +616,12 @@ pub fn rebuild_venv_and_sync_dependencies(
         SplashUpdate::loading(t!("setup.installing_deps"), t!("setup.verifying_deps"), 97)
             .with_subtitle(t!("setup.syncing_deps", tip = get_tip())),
     );
-    uv_sync_project(&mut status_updater, &bootstrap_uv, &cancel_requested)
+    uv_sync_project_with_protection(
+        &mut status_updater,
+        &bootstrap_uv,
+        &cancel_requested,
+        preserve_workspace || repository_is_development_workspace(Path::new(".")),
+    )
 }
 
 /// 读取解析后的 `config/deploy.yaml` 内容；文件缺失或格式错误时返回 `None`。
@@ -563,113 +629,6 @@ pub fn get_deploy_config() -> Option<JsonValue> {
     let config_content = fs::read_to_string("./config/deploy.yaml").ok()?;
     let config: JsonValue = serde_yaml::from_str(&config_content).ok()?;
     Some(config)
-}
-
-/// 清除可重建的运行时状态，让下次启动从干净状态开始。
-///
-/// 只删除 `.venv`、仓库的 `cache/` 与 uv 缓存；代码检出、`config/`
-/// 与 `log/` 均保留——依赖同步失败不应让用户付出重新克隆的代价。
-///
-/// # Errors
-/// 进程清理后目录仍无法删除时返回 Err。
-pub fn reset_venv_for_rebuild() -> Result<()> {
-    let repo_dir = alas_repo_dir();
-    kill_runtime_processes(&repo_dir);
-
-    remove_rebuildable_entry(&venv_dir())?;
-    remove_rebuildable_entry(&repo_dir.join("cache"))?;
-    clean_uv_cache()?;
-    Ok(())
-}
-
-/// 删除一个可重建的路径；路径不存在视为已清理，直接成功。
-///
-/// # Errors
-/// 删除失败（重试后仍被占用等）时返回 Err。
-fn remove_rebuildable_entry(path: &Path) -> Result<()> {
-    if !path.exists() {
-        info!("No {} to remove", path.display());
-        return Ok(());
-    }
-    info!("Removing {}", path.display());
-    remove_runtime_entry_with_retry(path).with_context(|| {
-        t!(
-            "errors.reset_venv_failed",
-            error = path.display().to_string()
-        )
-    })
-}
-
-/// 清空 uv 的全局下载缓存，释放磁盘空间。
-///
-/// # Errors
-/// 找不到 uv 引导程序或 `uv cache clean` 执行失败时返回 Err。
-fn clean_uv_cache() -> Result<()> {
-    let uv = bootstrap_uv_path()?;
-    info!("Cleaning uv cache with {}", uv.display());
-    let mut cmd = Command::new(&uv);
-    // UV_NO_PROGRESS 关闭交互式进度输出；清缓存不应受 UV_PYTHON 影响，故移除
-    cmd.args(["cache", "clean"])
-        .env("UV_NO_PROGRESS", "1")
-        .env_remove("UV_PYTHON");
-    isolate_python_child_environment(&mut cmd);
-    let status = cmd.create_no_window().status().with_context(|| {
-        t!(
-            "errors.uv_cache_cleanup_failed",
-            error = uv.display().to_string()
-        )
-    })?;
-    if !status.success() {
-        bail!(t!("errors.uv_cache_failed"));
-    }
-    Ok(())
-}
-
-/// 强制结束所有仍在使用仓库目录的运行时进程（gui.py 等）。
-///
-/// 依据进程的可执行文件路径或工作目录是否位于仓库目录内判定；
-/// 删除 `.venv` 前必须先停掉占用它的进程，否则 Windows 上文件
-/// 被锁定无法删除。
-fn kill_runtime_processes(repo_dir: &Path) {
-    let current_pid = std::process::id();
-    let sys = sysinfo::System::new_all();
-    for (pid, process) in sys.processes() {
-        if pid.as_u32() == current_pid {
-            continue;
-        }
-
-        let should_kill = process
-            .exe()
-            .map(|exe| path_is_inside(exe, repo_dir))
-            .unwrap_or(false)
-            || process
-                .cwd()
-                .map(|cwd| path_is_inside(cwd, repo_dir))
-                .unwrap_or(false);
-
-        if should_kill {
-            info!(
-                "Killing runtime process {} ({}) before cleanup",
-                pid,
-                process.name().to_string_lossy()
-            );
-            if !process.kill() {
-                warn!("Failed to kill runtime process {}", pid);
-            }
-        }
-    }
-
-    thread::sleep(Duration::from_millis(500));
-}
-
-/// 判断 path 是否位于 parent 目录之内（先规范化再比较前缀）。
-///
-/// 规范化可消除 `..`、符号链接等差异；无法规范化（已删除等）
-/// 时保守返回 false。
-fn path_is_inside(path: &Path, parent: &Path) -> bool {
-    path.canonicalize()
-        .map(|path| path.starts_with(parent))
-        .unwrap_or(false)
 }
 
 /// 递归删除目录/文件，删除前先清除只读属性。
@@ -1111,6 +1070,9 @@ fn run_command(
     // 等待子进程退出并检查退出码
     let status = child.wait()?;
     if !status.success() {
+        if matches!(phase, ScriptPhase::Git) && status.code() == Some(73) {
+            return Err(WorkspaceProtected.into());
+        }
         // stderr 为空时用阶段默认文案兜底，保证错误提示永远有内容
         if last_err.is_empty() {
             last_err = match phase {
@@ -1135,10 +1097,17 @@ fn run_command_with_retry(
     mut status_updater: impl FnMut(SplashUpdate),
     phase: ScriptPhase,
     cancel_requested: &AtomicBool,
+    protect_existing_checkout: bool,
 ) -> Result<()> {
     for retry in 0..=MAX_UPDATE_RETRIES {
         if cancel_requested.load(Ordering::SeqCst) {
             bail!(t!("setup.cancel_cleaning"));
+        }
+        if protect_existing_checkout
+            && matches!(phase, ScriptPhase::Git)
+            && repository_is_development_workspace(Path::new("."))
+        {
+            return Err(WorkspaceProtected.into());
         }
 
         match run_command(
@@ -1149,6 +1118,9 @@ fn run_command_with_retry(
         ) {
             Ok(()) => return Ok(()),
             Err(err) => {
+                if err.is::<WorkspaceProtected>() {
+                    return Err(err);
+                }
                 if retry == MAX_UPDATE_RETRIES {
                     return Err(err);
                 }
@@ -1276,25 +1248,19 @@ fn git_update(
     cancel_requested: &AtomicBool,
 ) -> Result<()> {
     // Decorate execute() to get fetch progress
-    let script = r#"
-import deploy.git
-def decorate_execute(fn):
-    def new_fn(*args, **kwargs):
-        if len(args) >= 1 and ' fetch ' in args[0] and '--progress' not in args[0]:
-            args = (args[0].replace(' fetch ', ' fetch --progress '),) + args[1:]
-        return fn(*args, **kwargs)
-    return new_fn
-gm = deploy.git.GitManager()
-gm.execute = decorate_execute(gm.execute)
-gm.git_install()
-"#;
+    let script = GIT_UPDATE_SCRIPT;
     let python = venv_python();
     let bootstrap_uv = bootstrap_uv.to_path_buf();
+    let protect_existing_checkout = Path::new(".git").exists();
     run_command_with_retry(
         || {
             let mut cmd = Command::new(&python);
             cmd.args(["-c", script])
-                .env("AZURPILOT_BOOTSTRAP_UV", &bootstrap_uv);
+                .env("AZURPILOT_BOOTSTRAP_UV", &bootstrap_uv)
+                .env(
+                    "AZURPILOT_RELEASE_BOOTSTRAP",
+                    if protect_existing_checkout { "0" } else { "1" },
+                );
             isolate_python_child_environment(&mut cmd);
             bypass_proxy_for_child(&mut cmd);
             cmd
@@ -1302,8 +1268,67 @@ gm.git_install()
         status_updater,
         ScriptPhase::Git,
         cancel_requested,
+        protect_existing_checkout,
     )
 }
+
+#[derive(Debug)]
+struct WorkspaceProtected;
+
+impl std::fmt::Display for WorkspaceProtected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", t!("errors.workspace_protected"))
+    }
+}
+
+impl std::error::Error for WorkspaceProtected {}
+
+const GIT_UPDATE_SCRIPT: &str = r#"
+import os
+import subprocess
+import sys
+import deploy.git
+
+had_git_checkout = (os.path.lexists('.git') and
+                    os.environ.get('AZURPILOT_RELEASE_BOOTSTRAP') != '1')
+
+def protect_workspace(gm):
+    # Published archives intentionally bootstrap a new repository. Only an
+    # existing checkout has local Git history/work to protect before reset.
+    if not had_git_checkout:
+        return
+    def check(args):
+        result = subprocess.run([gm.git, *args], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True,
+                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        if result.returncode:
+            raise RuntimeError('Git safety check failed')
+        return result.stdout.strip()
+    try:
+        if not os.path.isdir('.git'):
+            raise RuntimeError('Git worktree requires development protection')
+        if check(['symbolic-ref', '--quiet', '--short', 'HEAD']) != gm.Branch:
+            raise RuntimeError('Current branch differs from deployment branch')
+        if check(['status', '--porcelain', '--untracked-files=normal']):
+            raise RuntimeError('Local files have uncommitted changes')
+        check(['merge-base', '--is-ancestor', 'HEAD', 'refs/remotes/origin/' + gm.Branch])
+    except (OSError, RuntimeError, TypeError) as error:
+        print('Workspace protected: ' + str(error), file=sys.stderr)
+        sys.exit(73)
+
+def decorate_execute(fn):
+    def new_fn(*args, **kwargs):
+        if args and ' reset --hard ' in args[0]:
+            protect_workspace(gm)
+        if len(args) >= 1 and ' fetch ' in args[0] and '--progress' not in args[0]:
+            args = (args[0].replace(' fetch ', ' fetch --progress '),) + args[1:]
+        return fn(*args, **kwargs)
+    return new_fn
+gm = deploy.git.GitManager()
+protect_workspace(gm)
+gm.execute = decorate_execute(gm.execute)
+gm.git_install()
+"#;
 
 /// 按 `uv.lock` 同步 Python 依赖，带 PyPI 镜像源的多级回退。
 ///
@@ -1313,11 +1338,31 @@ gm.git_install()
 ///
 /// # Errors
 /// 用户取消或所有候选源均失败时返回 Err。
-fn uv_sync_project(
+fn uv_sync_project_with_protection(
     mut status_updater: impl FnMut(SplashUpdate),
     bootstrap_uv: &Path,
     cancel_requested: &AtomicBool,
+    protect_workspace: bool,
 ) -> Result<()> {
+    if protect_workspace {
+        info!("Preserving development configuration and uv.lock; syncing frozen dependencies");
+        let mut cmd = uv_sync_command(bootstrap_uv, DEFAULT_PYPI_INDEX);
+        cmd.arg("--frozen");
+        return run_command(
+            &mut cmd,
+            &mut status_updater,
+            ScriptPhase::Dependencies,
+            cancel_requested,
+        );
+    }
+    // Mirror resolution is a runtime concern. Restore the published lockfile
+    // even on failure so the next launch is not mistaken for a dirty checkout.
+    let original_lock = match fs::read("uv.lock") {
+        Ok(contents) => Some(contents),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err).context("Unable to preserve published uv.lock"),
+    };
+    let _lock_restore = LockfileRestore(original_lock);
     let bootstrap_uv = bootstrap_uv.to_path_buf();
     let indexes = ranked_pypi_indexes();
     let next_indexes = indexes.clone();
@@ -1372,6 +1417,23 @@ fn uv_sync_project(
     }
 
     Err(last_error.unwrap_or_else(|| anyhow!(t!("setup.deps_failed").to_string())))
+}
+
+struct LockfileRestore(Option<Vec<u8>>);
+
+impl Drop for LockfileRestore {
+    fn drop(&mut self) {
+        let result = match &self.0 {
+            Some(contents) => fs::write("uv.lock", contents),
+            None => match fs::remove_file("uv.lock") {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                result => result,
+            },
+        };
+        if let Err(err) = result {
+            warn!("Unable to restore published uv.lock after mirror sync: {err}");
+        }
+    }
 }
 
 /// 重锁 `uv.lock`，使其下载 URL 全部指向指定镜像源；失败记录到 last_error。
@@ -2916,6 +2978,130 @@ fn find_percentage(s: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_update_script_refuses_changes_created_during_install() {
+        let Some(python) = find_on_path("python3").or_else(|| find_on_path("python")) else {
+            // CI without Python still exercises the Rust repository guard.
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for args in [
+            vec!["init", "-b", "master"],
+            vec!["config", "user.email", "fixture@example.invalid"],
+            vec!["config", "user.name", "Fixture"],
+        ] {
+            assert!(Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .create_no_window()
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        fs::write(root.join("source.txt"), "published").unwrap();
+        for args in [
+            vec!["add", "."],
+            vec!["commit", "-m", "fixture"],
+            vec!["update-ref", "refs/remotes/origin/master", "HEAD"],
+        ] {
+            assert!(Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .create_no_window()
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        // Fake only deploy.git, retaining real Git and the actual updater script.
+        // The update starts clean, then local work appears just before reset.
+        let stub = r#"
+import sys, types, pathlib
+package = types.ModuleType('deploy')
+module = types.ModuleType('deploy.git')
+class GitManager:
+    git = 'git'
+    Branch = 'master'
+    def execute(self, *args, **kwargs):
+        pathlib.Path('reset-executed').write_text('unsafe')
+    def git_install(self):
+        pathlib.Path('source.txt').write_text('new developer work')
+        self.execute('git reset --hard origin/master')
+module.GitManager = GitManager
+package.git = module
+sys.modules['deploy'] = package
+sys.modules['deploy.git'] = module
+"#;
+        let output = Command::new(python)
+            .current_dir(root)
+            .env_remove("AZURPILOT_RELEASE_BOOTSTRAP")
+            .args(["-c", &format!("{stub}\n{GIT_UPDATE_SCRIPT}")])
+            .create_no_window()
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(73),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!root.join("reset-executed").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("source.txt")).unwrap(),
+            "new developer work"
+        );
+    }
+
+    #[test]
+    fn update_protection_distinguishes_release_and_local_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .create_no_window()
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        assert!(!repository_is_development_workspace(root));
+        git(&["init", "-b", "master"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        git(&["config", "user.name", "Fixture"]);
+        fs::write(root.join(".gitignore"), "config/\nlog/\n.venv/\n").unwrap();
+        fs::write(root.join("source.txt"), "published").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "published"]);
+        git(&["update-ref", "refs/remotes/origin/master", "HEAD"]);
+        assert!(!repository_is_development_workspace(root));
+        fs::create_dir(root.join("log")).unwrap();
+        fs::write(root.join("log/runtime.txt"), "runtime").unwrap();
+        assert!(!repository_is_development_workspace(root));
+        fs::write(root.join("source.txt"), "uncommitted").unwrap();
+        assert!(repository_is_development_workspace(root));
+        git(&["add", "source.txt"]);
+        git(&["commit", "-m", "local work"]);
+        assert!(repository_is_development_workspace(root));
+        git(&["update-ref", "refs/remotes/origin/master", "HEAD"]);
+        assert!(!repository_is_development_workspace(root));
+        git(&["reset", "--hard", "HEAD~1"]);
+        assert!(!repository_is_development_workspace(root));
+        git(&["reset", "--hard", "refs/remotes/origin/master"]);
+        git(&["checkout", "-b", "codex/fixture"]);
+        assert!(repository_is_development_workspace(root));
+        git(&["checkout", "master"]);
+        fs::write(root.join("new-source.txt"), "untracked work").unwrap();
+        assert!(repository_is_development_workspace(root));
+        assert_eq!(
+            fs::read_to_string(root.join("source.txt")).unwrap(),
+            "uncommitted"
+        );
+    }
 
     #[test]
     fn backend_timeout_recovery_removes_only_venv() {

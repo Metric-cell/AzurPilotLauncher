@@ -1,15 +1,13 @@
 //! 后端进程托管模块：负责 gui.py（AzurPilot WebUI）子进程的完整生命周期。
-//! 启动前先清理占用目标端口的残留进程，再以进程组方式拉起 Python 解释器，
-//! 并注入 `ALAS_LAUNCHER_PID` 环境变量标记子进程归属，便于退出时兜底回收。
-//! main.rs 在启动流程中调用 [`ManagedBackend::new`] 拉起后端，退出时依赖
-//! [`ManagedBackend`] 的 [`Drop`] 实现杀掉遗留子进程，防止进程泄漏。
+//! 启动前检查实际监听地址是否可用，绝不终止无法证明归属的占用进程。
+//! 子进程使用独立进程组，仅凭持有的句柄回收本次后端及其派生进程。
 
 use std::{
-    collections::BTreeSet,
     io::Read as _,
-    net::TcpStream,
+    net::{TcpListener, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
+    sync::atomic::{AtomicBool, Ordering},
     thread::sleep,
     time::Duration,
 };
@@ -18,11 +16,11 @@ use anyhow::{anyhow, Result};
 use chrono::Local;
 use command_group::{CommandGroup, GroupChild};
 use serde_json::Value as JsonValue;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::setup::{alas_repo_dir, isolate_python_child_environment, venv_python};
-use crate::{launcher_trust_secret, TRUST_SECRET_ENV};
 use crate::window_util::CreateNoWindow as _;
+use crate::{launcher_trust_secret, TRUST_SECRET_ENV};
 
 /// 等待后端端口就绪的总超时时长，超时后判定启动失败并交由上层恢复。
 ///
@@ -42,6 +40,7 @@ const BACKEND_FAILURE_LOG_TAIL_BYTES: u64 = 64 * 1024;
 pub(crate) struct BackendStartupTimeout {
     /// 尚未就绪的目标端口，仅用于错误信息展示。
     port: u16,
+    last_error: String,
 }
 
 /// 按约定实现 `Display`，让超时错误在上层日志与界面中可读。
@@ -50,8 +49,8 @@ impl std::fmt::Display for BackendStartupTimeout {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "Timeout waiting for port {} to be ready",
-            self.port
+            "Timeout waiting for port {} to be ready: {}",
+            self.port, self.last_error
         )
     }
 }
@@ -135,6 +134,73 @@ impl WebuiLaunchConfig {
         }
     }
 
+    fn listen_host(&self) -> &str {
+        self.host
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.ssl_key.is_some() != self.ssl_cert.is_some() {
+            return Err(anyhow!(rust_i18n::t!("errors.backend_invalid_tls")));
+        }
+        if self.port == 0 {
+            return Err(anyhow!(rust_i18n::t!("errors.backend_invalid_port")));
+        }
+        Ok(())
+    }
+
+    /// 浏览器、通知流和就绪检查共享的后端地址；通配监听使用对应回环地址。
+    pub fn backend_url(&self) -> Result<String> {
+        self.validate()?;
+        let host = match self.listen_host() {
+            "0.0.0.0" => "127.0.0.1",
+            "::" => "::1",
+            host => host,
+        };
+        let host = if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host.to_owned()
+        };
+        let scheme = if self.ssl_key.is_some() && self.ssl_cert.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        let url = format!("{scheme}://{host}:{}/", self.port);
+        reqwest::Url::parse(&url)?;
+        Ok(url)
+    }
+
+    /// 后端专用客户端。不使用系统代理，TLS 始终验证证书链和主机名。
+    /// 配置中的 PEM 证书作为额外可信根，用于显式配置的本地自签名服务。
+    pub fn http_client(&self, timeout: Duration) -> Result<reqwest::blocking::Client> {
+        Ok(self.http_client_builder()?.timeout(timeout).build()?)
+    }
+
+    /// SSE 调用者可仅设置 connect_timeout，避免总时限截断长连接。
+    pub fn http_client_builder(&self) -> Result<reqwest::blocking::ClientBuilder> {
+        self.validate()?;
+        let mut builder = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(path) = &self.ssl_cert {
+            let path = Path::new(path);
+            let path = if path.is_absolute() {
+                path.to_owned()
+            } else {
+                alas_repo_dir().join(path)
+            };
+            let pem = std::fs::read(path)?;
+            for certificate in reqwest::Certificate::from_pem_bundle(&pem)? {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+        Ok(builder)
+    }
+
     /// 把配置翻译为传给 Python 解释器的 gui.py 参数列表（不含解释器本身）。
     ///
     /// `--host`/`--port` 恒定存在；其余开关仅在对应字段有值时追加，
@@ -144,7 +210,7 @@ impl WebuiLaunchConfig {
         let mut args = vec![
             "gui.py".to_owned(),
             "--host".to_owned(),
-            self.host.clone(),
+            self.listen_host().to_owned(),
             "--port".to_owned(),
             self.port.to_string(),
         ];
@@ -228,8 +294,7 @@ fn value_as_string_list(value: &JsonValue) -> Vec<String> {
 /// 托管中的 gui.py 子进程句柄。
 ///
 /// 持有进程组的 [`GroupChild`]，使终止操作能连同 gui.py 派生的孙进程
-/// （例如 uvicorn worker）一并结束；子进程的归属另通过 `ALAS_LAUNCHER_PID`
-/// 环境变量在进程表层面标记，供 `Drop` 兜底回收使用。
+/// （例如 uvicorn worker）一并结束，不依赖共享的启动器 PID 环境变量扫描。
 pub struct ManagedBackend {
     /// 进程组子进程句柄；`None` 表示已被 [`ManagedBackend::terminate`]
     /// 取走或从未成功拉起，此时 `Drop` 不再重复强杀。
@@ -240,29 +305,24 @@ pub struct ManagedBackend {
 impl ManagedBackend {
     /// 按配置启动 gui.py 并阻塞等待其 WebUI 端口就绪。
     ///
-    /// 流程依次为：写入 `ALAS_LAUNCHER_PID` 归属标记、清理占用目标端口的
-    /// 残留进程、以进程组拉起子进程、轮询 TCP 连接直至就绪或超时。超时路径
-    /// 会先主动终止刚拉起的子进程再返回错误，避免遗留半死进程。
+    /// 检查监听地址、启动进程组，再等待 HTTP(S) 服务回应。
+    /// 失败和超时路径均回收本次启动的进程组，不处理已有用户服务。
     ///
     /// # Errors
     ///
-    /// 端口清理或进程拉起失败、等待期间子进程提前退出（此时会尝试从
-    /// gui 日志提取可读原因）时返回错误；等待超过 [`BACKEND_STARTUP_TIMEOUT`]
-    /// 时返回 [`BackendStartupTimeout`]。
-    ///
-    /// # Panics
-    ///
-    /// 仅当 `127.0.0.1:{port}` 无法解析为 `SocketAddr` 时 `unwrap` 会 panic；
-    /// `u16` 端口拼上固定回环地址恒可解析，该不变量由类型系统保证。
-    pub fn new(config: &WebuiLaunchConfig) -> Result<Self> {
-        // 先写归属标记再启动：此后任何时刻，本启动器拉起的 gui.py 都能通过
-        // 环境变量追溯到当前启动器实例，供 Drop 的全进程表扫描兜底回收。
-        std::env::set_var("ALAS_LAUNCHER_PID", format!("{}", std::process::id()));
-        kill_processes_using_port(config.port)?;
+    /// 配置无效、监听地址占用、进程启动失败、提前退出或就绪超时均返回错误。
+    pub fn new(config: &WebuiLaunchConfig, cancel_requested: &AtomicBool) -> Result<Self> {
+        check_startup_cancelled(cancel_requested)?;
+        config.validate()?;
+        ensure_listener_available(config)?;
+        let client = config.http_client(Duration::from_millis(500))?;
+        let url = config.backend_url()?;
 
         // 使用仓库 venv 内的 Python 解释器，避免依赖系统全局 Python 环境。
         let mut command = Command::new(venv_python());
         command.args(config.args());
+        command.current_dir(alas_repo_dir());
+        command.env("ALAS_LAUNCHER_PID", std::process::id().to_string());
         // 注入启动器信任密钥，WebUI 据此为启动器窗口开启免密；子进程缺省继承，
         // isolate_python_child_environment 不清理该键。
         command.env(TRUST_SECRET_ENV, launcher_trust_secret());
@@ -271,22 +331,42 @@ impl ManagedBackend {
         let child = command.group().create_no_window().spawn()?;
         let mut res = Self { child: Some(child) };
 
-        // 就绪判定：对 127.0.0.1:{port} 的 TCP 三次握手成功即认为 WebUI 可用。
-        let address = format!("127.0.0.1:{}", config.port).parse().unwrap();
         let start_time = std::time::Instant::now();
-        // 每 100 毫秒探测一次；探测间隔同时决定了感知子进程退出的最大延迟。
+        let mut last_error = "Backend has not responded".to_owned();
         while start_time.elapsed() < BACKEND_STARTUP_TIMEOUT {
-            if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
-                return Ok(res);
-            }
-            // 端口未就绪但子进程已退出时立即报错，避免傻等满超时。
+            check_startup_cancelled(cancel_requested)?;
+            // 先检查退出状态，防止已退出子进程被其他监听者的响应掩盖。
             if let Some(child) = res.child.as_mut() {
                 if let Some(status) = child.try_wait()? {
                     return Err(backend_exit_error(config, &status));
                 }
             }
+            // TCP 接通不能证明 HTTP 服务已就绪；TLS 请求保留证书和主机名验证。
+            match client.get(&url).send() {
+                Ok(response) if !response.status().is_server_error() => {
+                    check_startup_cancelled(cancel_requested)?;
+                    if let Some(child) = res.child.as_mut() {
+                        if let Some(status) = child.try_wait()? {
+                            return Err(backend_exit_error(config, &status));
+                        }
+                    }
+                    return Ok(res);
+                }
+                Ok(response) => last_error = format!("HTTP {}", response.status()),
+                Err(error) => {
+                    if is_tls_certificate_error(&error) {
+                        let error = format!("{:#}", anyhow::Error::from(error));
+                        return Err(anyhow!(rust_i18n::t!(
+                            "errors.backend_tls_failed",
+                            error = error
+                        )));
+                    }
+                    last_error = format!("{:#}", anyhow::Error::from(error));
+                }
+            }
             sleep(Duration::from_millis(100));
         }
+        check_startup_cancelled(cancel_requested)?;
         // 超时路径：先回收刚拉起的子进程，再向上报告超时，保证不留孤儿进程。
         res.terminate().map_err(|error| {
             anyhow!(
@@ -294,7 +374,11 @@ impl ManagedBackend {
                 config.port
             )
         })?;
-        Err(BackendStartupTimeout { port: config.port }.into())
+        Err(BackendStartupTimeout {
+            port: config.port,
+            last_error,
+        }
+        .into())
     }
 
     /// 终止托管的 gui.py 进程组并等待其退出。
@@ -302,235 +386,105 @@ impl ManagedBackend {
     /// Unix 上先向进程组发送 `SIGTERM` 并给予 500 毫秒优雅退出窗口，仍未
     /// 退出才强杀；Windows 没有 SIGTERM 语义，直接强杀。子进程句柄已被取走
     /// 或从未拉起时，返回默认的 `ExitStatus`（视同正常退出）。
+    /// 子进程组长已退出时也会回收组内遗留进程；失败时保留句柄供 Drop 重试。
     ///
     /// # Errors
     ///
     /// 强杀或回收退出状态失败（例如句柄已失效、等待被中断）时返回错误。
     pub fn terminate(&mut self) -> Result<ExitStatus> {
-        // take() 让 self.child 变为 None：无论后续成败，本函数只会执行一次，
-        // Drop 也不会再对同一进程重复 kill。
-        if let Some(mut child) = self.child.take() {
+        if let Some(child) = self.child.as_mut() {
             #[cfg(unix)]
             {
                 use command_group::{Signal, UnixChildExt};
-                // 先礼后兵：SIGTERM 让 uvicorn 有机会清理子资源；忽略发送
-                // 失败（进程可能已退出），由下方的强杀兜底。
                 let _ = child.signal(Signal::SIGTERM);
                 let start_time = std::time::Instant::now();
                 while start_time.elapsed() < Duration::from_millis(500) {
-                    if let Ok(Some(exit_status)) = child.try_wait() {
-                        return Ok(exit_status);
+                    if let Some(status) = child.try_wait()? {
+                        // 仍强杀进程组，以清理已退出组长留下的孙进程。
+                        kill_owned_group(child)?;
+                        self.child.take();
+                        return Ok(status);
                     }
-                    sleep(Duration::from_millis(100));
+                    sleep(Duration::from_millis(50));
                 }
-                warn!("gui.py didn't exit, killing it...");
             }
-            // 兜底强杀：SIGTERM 窗口超时，或平台本就没有优雅退出语义。
-            child.kill()?;
-            Ok(child.wait()?)
+            // 失败时保留句柄，Drop 仍能重试回收。
+            kill_owned_group(child)?;
+            let status = child.wait()?;
+            self.child.take();
+            Ok(status)
         } else {
-            // 没有可终止的子进程（未启动或已回收），按"正常退出"处理。
             Ok(ExitStatus::default())
         }
     }
 }
 
-/// 清理占用指定 TCP 端口的所有进程，并等待端口真正释放。
-///
-/// ALAS 非正常退出时常遗留占用 WebUI 端口的 Python 进程，不清掉会导致
-/// 新后端绑定端口失败。扫描失败视为可容忍路径（仅告警后放行），因为端口
-/// 本就可能无人占用；同时跳过 PID 0 与启动器自身，避免误杀。
-///
-/// # Errors
-///
-/// 当前实现把扫描失败一律降级为告警并返回 `Ok(())`，实际不会向调用方
-/// 传递 `Err`；保留 `Result` 签名以便未来收紧失败策略。
-fn kill_processes_using_port(port: u16) -> Result<()> {
-    // 扫描失败不算致命：端口很可能本来就没被占用，直接放行启动流程。
-    let pids = match pids_using_tcp_port(port) {
-        Ok(pids) => pids,
-        Err(e) => {
-            warn!("Unable to scan processes using port {}: {}", port, e);
-            return Ok(());
-        }
-    };
-    if pids.is_empty() {
-        return Ok(());
+/// TLS 证书失败属于配置错误，继续等待不会修复；只做类型匹配，不猜错误文本。
+fn is_tls_certificate_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    if matches!(
+        error.downcast_ref::<rustls::Error>(),
+        Some(rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented)
+    ) {
+        return true;
     }
-
-    let current_pid = std::process::id();
-    let sys = sysinfo::System::new_all();
-    // PID 0 是系统空闲进程；current_pid 是启动器自身（自身也可能出现在
-    // 监听列表的瞬时快照中），二者都绝不能杀。
-    for pid in pids {
-        if pid == 0 || pid == current_pid {
-            continue;
-        }
-
-        let sys_pid = sysinfo::Pid::from_u32(pid);
-        match sys.process(sys_pid) {
-            Some(process) => {
-                info!(
-                    "Killing process {} ({}) using configured WebUI port {}",
-                    pid,
-                    process.name().to_string_lossy(),
-                    port
-                );
-                // sysinfo 的 kill 跨平台一致（Windows TerminateProcess，
-                // Unix SIGKILL），无需分支处理。
-                if !process.kill() {
-                    warn!("Failed to kill process {} using port {}", pid, port);
-                }
-            }
-            None => {
-                // 快照建立后目标进程刚好自行退出，无需处理。
-                warn!(
-                    "Process {} was using port {}, but exited before it could be killed",
-                    pid, port
-                );
-            }
+    // 某些网络层把 TLS 错误藏在 io::Error 的 payload，而 source() 跳过该层。
+    if let Some(error) = error.downcast_ref::<std::io::Error>() {
+        if error
+            .get_ref()
+            .is_some_and(|inner| is_tls_certificate_error(inner))
+        {
+            return true;
         }
     }
+    error.source().is_some_and(is_tls_certificate_error)
+}
 
-    // 等待端口真正释放后再返回：内核回收监听 socket 有延迟，立即启动
-    // 新后端可能绑定失败；5 秒上限防止极端残留拖死启动流程。
-    let start_time = std::time::Instant::now();
-    while start_time.elapsed() < Duration::from_secs(5) {
-        match pids_using_tcp_port(port) {
-            Ok(pids) if pids.is_empty() => return Ok(()),
-            Ok(_) => sleep(Duration::from_millis(100)),
-            Err(e) => {
-                warn!("Unable to verify port {} was released: {}", port, e);
-                return Ok(());
-            }
-        }
+fn check_startup_cancelled(cancel_requested: &AtomicBool) -> Result<()> {
+    if cancel_requested.load(Ordering::Acquire) {
+        Err(anyhow!(rust_i18n::t!("errors.backend_startup_cancelled")))
+    } else {
+        Ok(())
     }
-
-    warn!("Timed out waiting for port {} to be released", port);
-    Ok(())
 }
 
-/// 列出当前监听指定 TCP 端口的进程 PID 集合（Windows 实现）。
-///
-/// 选用 `netstat -ano -p tcp`：Windows 自带、无需第三方依赖；
-/// Unix 平台的同名函数改用 `lsof`，见 `#[cfg(unix)]` 版本。
-///
-/// # Errors
-///
-/// `netstat` 无法启动（不在 PATH 中）或以非零状态退出时返回错误。
-#[cfg(windows)]
-fn pids_using_tcp_port(port: u16) -> Result<BTreeSet<u32>> {
-    let output = Command::new("netstat")
-        .args(["-ano", "-p", "tcp"])
-        .create_no_window()
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!("netstat failed with status {}", output.status));
+/// 已不存在的 Unix 进程组视为已回收；其余错误保留句柄并传播。
+fn kill_owned_group(child: &mut GroupChild) -> std::io::Result<()> {
+    match child.kill() {
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(nix::libc::ESRCH) => Ok(()),
+        result => result,
     }
-
-    Ok(parse_windows_netstat_pids(&output.stdout, port))
 }
 
-/// 解析 `netstat -ano -p tcp` 的输出，返回监听目标端口的所有 PID。
-///
-/// netstat 的数据行格式为 `协议 本地地址 外部地址 状态 PID`（至少 5 列，
-/// 另有表头与分隔行），因此必须同时满足：首列为 `TCP`、状态列为
-/// `LISTENING`、本地地址列（第 2 列）的端口与目标一致，此时末列才是
-/// 可解析的 PID；`-a` 会列出全部连接，必须靠状态列过滤。
-#[cfg(windows)]
-fn parse_windows_netstat_pids(output: &[u8], port: u16) -> BTreeSet<u32> {
-    String::from_utf8_lossy(output)
-        .lines()
-        .filter_map(|line| {
-            // netstat 行形如 "TCP    0.0.0.0:22267   0.0.0.0:0  LISTENING  1234"；
-            // 表头行、分隔行与非 LISTENING 行都不满足下列条件，直接过滤。
-            let parts: Vec<_> = line.split_whitespace().collect();
-            if parts.len() < 5
-                || !parts[0].eq_ignore_ascii_case("TCP")
-                || !parts[3].eq_ignore_ascii_case("LISTENING")
-                || !local_address_uses_port(parts[1], port)
-            {
-                return None;
-            }
-            // 通过全部校验后，末列即 PID。
-            parts.last()?.parse::<u32>().ok()
-        })
-        .collect()
-}
-
-/// 列出当前监听指定 TCP 端口的进程 PID 集合（Unix 实现）。
-///
-/// 选用 `lsof -nP -iTCP:{port} -sTCP:LISTEN -t`：`-t` 只输出 PID（省去
-/// 表头）、`-nP` 跳过主机名与端口名的反解以加速；Windows 上 lsof 不可用，
-/// 故同名函数基于 `netstat` 文本解析实现。
-///
-/// # Errors
-///
-/// `lsof` 命令无法启动时返回错误；注意 lsof 在"无进程监听该端口"时也会
-/// 以非零状态退出且输出为空，这是正常情况，此处返回空集合而非错误。
-#[cfg(unix)]
-fn pids_using_tcp_port(port: u16) -> Result<BTreeSet<u32>> {
-    let output = Command::new("lsof")
-        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
-        .create_no_window()
-        .output()?;
-    // 非零退出码 + 空 stdout 是 lsof 表示"没有匹配进程"的方式，不是故障。
-    if !output.status.success() && output.stdout.is_empty() {
-        return Ok(BTreeSet::new());
-    }
-
-    // 输出每行一个 PID；空行与无法解析的行直接忽略。
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .collect())
-}
-
-/// 判断 netstat 的"本地地址"列是否指向目标端口。
-///
-/// 用 `rsplit_once(':')` 从右侧切出端口：IPv6 监听地址形如 `[::]:22267`，
-/// 只有从右往左切才能正确越过方括号内的冒号。
-#[cfg(windows)]
-fn local_address_uses_port(address: &str, port: u16) -> bool {
-    address
-        .rsplit_once(':')
-        .and_then(|(_, port_part)| port_part.parse::<u16>().ok())
-        == Some(port)
-}
-
-/// 兜底回收：无论 `ManagedBackend` 因何种路径被丢弃，都确保 gui.py 不残留。
-///
-/// `Drop` 在正常返回、错误传播与 panic 展开等所有路径上都会执行，因此即使
-/// 启动中途失败（例如端口等待超时、调用方提前丢弃句柄），已拉起的子进程
-/// 也会在此被终止。除直接 `kill` 进程组外，还会扫描全系统进程表，按
-/// `ALAS_LAUNCHER_PID` 环境变量找出"归属当前启动器、但句柄已随失败路径
-/// 丢失"的子进程一并回收，这是防止进程泄漏的最后防线。
+/// 只回收当前句柄拥有的进程组；不扫描共享环境标记，避免旧实例误杀新实例。
 impl Drop for ManagedBackend {
     fn drop(&mut self) {
-        // child 仍为 Some 说明尚未走过 terminate（terminate 会 take 掉句柄），
-        // 直接强杀进程组即可；失败仅告警，不阻断后续的泄漏扫描。
-        if let Some(mut child) = self.child.take() {
-            match child.kill() {
-                Ok(_) => {}
-                Err(e) => warn!("Failed to kill gui.py process: {:?}", e),
-            }
-        }
-        // 扫描潜在泄漏的进程：启动失败等路径可能拿不到子进程句柄，此时只能
-        // 依据 ALAS_LAUNCHER_PID 环境变量在进程表层面反查归属并补杀。
-        let sys = sysinfo::System::new_all();
-        for (pid, process) in sys.processes() {
-            for var in process.environ() {
-                // 启动器自身的进程环境里同样带有该变量（set_var 设置的就是
-                // 本进程，子进程只是继承），必须排除自身 PID，否则会误杀自己。
-                if pid.as_u32() != std::process::id()
-                    && var.to_str().unwrap_or_default()
-                        == format!("ALAS_LAUNCHER_PID={}", std::process::id())
-                {
-                    process.kill();
-                }
-            }
+        if let Err(error) = self.terminate() {
+            warn!("Failed to stop gui.py process group: {error:#}");
         }
     }
+}
+
+/// 检查实际监听地址能否绑定。检查不会终止任何占用端口的进程。
+fn ensure_listener_available(config: &WebuiLaunchConfig) -> Result<()> {
+    let addresses: Vec<_> = (config.listen_host(), config.port)
+        .to_socket_addrs()?
+        .collect();
+    if addresses.is_empty() {
+        return Err(anyhow!("No listening address resolved for {}", config.host));
+    }
+    let mut listeners = Vec::new();
+    for address in addresses {
+        listeners.push(TcpListener::bind(address).map_err(|error| {
+            anyhow!(rust_i18n::t!(
+                "errors.backend_port_in_use",
+                host = config.host.as_str(),
+                port = config.port,
+                error = error.to_string()
+            ))
+        })?);
+    }
+    Ok(())
 }
 
 /// 将子进程异常退出表述为可读原因：优先取 gui.py 写在日志里的失败原因，
@@ -586,12 +540,12 @@ fn read_log_tail(path: &Path) -> Option<String> {
     if bytes.contains(&0) {
         return None;
     }
-    let text = String::from_utf8(bytes).ok()?;
-    if start == 0 {
-        return Some(text);
+    if start > 0 {
+        // 在 UTF-8 解码前丢弃被截断的首行，偏移可能落在多字节字符内部。
+        let first_newline = bytes.iter().position(|byte| *byte == b'\n')?;
+        bytes.drain(..=first_newline);
     }
-    // 起始偏移可能落在字符中间，丢掉不完整的首行。
-    Some(text.split_once('\n').map(|(_, tail)| tail.to_owned())?)
+    String::from_utf8(bytes).ok()
 }
 
 /// 日志行形如「时间 | 级别 | [GUI] AzurPilot Web服务启动失败：原因」，取最后一次的原因。
@@ -608,6 +562,168 @@ fn extract_failure_reason(log_tail: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn wait_for_fixture(condition: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(std::time::Instant::now() < deadline, "fixture timed out");
+            sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_cleans_descendants_after_group_leader_exits() {
+        let directory = tempfile::tempdir().unwrap();
+        let heartbeat = directory.path().join("heartbeat");
+        let pid_file = directory.path().join("pid");
+        let child = Command::new("sh")
+            .args(["-c", "sh -c 'trap \"\" TERM; while :; do echo tick >> \"$1\"; sleep 0.05; done' fixture \"$1\" & echo $! > \"$2\"", "fixture"])
+            .arg(&heartbeat)
+            .arg(&pid_file)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .group_spawn()
+            .unwrap();
+        let mut backend = ManagedBackend { child: Some(child) };
+        wait_for_fixture(|| heartbeat.exists() && pid_file.exists());
+        // 确保组长已被 try_wait 回收，孙进程仍持续运行。
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while backend
+            .child
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none()
+        {
+            assert!(std::time::Instant::now() < deadline);
+            sleep(Duration::from_millis(20));
+        }
+        let pid: u32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        backend.terminate().unwrap();
+        wait_for_fixture(|| {
+            let system = sysinfo::System::new_all();
+            system
+                .process(sysinfo::Pid::from_u32(pid))
+                .is_none_or(|process| {
+                    process.status() == sysinfo::ProcessStatus::Zombie
+                        || process.status() == sysinfo::ProcessStatus::Dead
+                })
+        });
+        assert!(backend.child.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_backend_leaves_unrelated_same_launcher_pid_fixture_running() {
+        fn fixture() -> ManagedBackend {
+            let child = Command::new("sh")
+                .args(["-c", "while :; do sleep 1; done"])
+                .env("ALAS_LAUNCHER_PID", std::process::id().to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .group_spawn()
+                .unwrap();
+            ManagedBackend { child: Some(child) }
+        }
+        let mut unrelated = fixture();
+        let owned = fixture();
+        assert!(unrelated
+            .child
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none());
+        drop(owned);
+        assert!(unrelated
+            .child
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none());
+        unrelated.terminate().unwrap();
+    }
+
+    #[test]
+    fn backend_url_respects_scheme_and_listener_address() {
+        let mut config = WebuiLaunchConfig::from_deploy_config(None);
+        config.host = "::".into();
+        assert_eq!(config.backend_url().unwrap(), "http://[::1]:22267/");
+        config.host = "192.0.2.5".into();
+        config.ssl_key = Some("key.pem".into());
+        assert!(config.backend_url().is_err());
+        config.ssl_cert = Some("cert.pem".into());
+        assert_eq!(config.backend_url().unwrap(), "https://192.0.2.5:22267/");
+        config.host = "[::1]".into();
+        assert_eq!(config.args()[2], "::1");
+        assert_eq!(config.backend_url().unwrap(), "https://[::1]:22267/");
+    }
+
+    #[test]
+    fn occupied_listener_is_reported_and_left_running() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut config = WebuiLaunchConfig::from_deploy_config(None);
+        config.port = listener.local_addr().unwrap().port();
+        assert!(ensure_listener_available(&config).is_err());
+        assert!(std::net::TcpStream::connect(listener.local_addr().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn log_tail_handles_offset_inside_a_utf8_character() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("utf8_gui.txt");
+        let reason = format!("\n{BACKEND_FAILURE_LOG_MARKER}正确原因\n");
+        let padding = BACKEND_FAILURE_LOG_TAIL_BYTES as usize - reason.len() - 2;
+        // 总长度比上限多一字节，使 seek 停在首个汉字的第二字节。
+        std::fs::write(&path, format!("中{}{}", "x".repeat(padding), reason)).unwrap();
+        let tail = read_log_tail(&path).unwrap();
+        assert_eq!(extract_failure_reason(&tail).as_deref(), Some("正确原因"));
+    }
+
+    #[test]
+    fn tls_certificate_errors_are_recognized_through_io_wrapping() {
+        let certificate_error =
+            rustls::Error::InvalidCertificate(rustls::CertificateError::Expired);
+        let wrapped = std::io::Error::new(std::io::ErrorKind::InvalidData, certificate_error);
+        assert!(is_tls_certificate_error(&wrapped));
+        assert!(is_tls_certificate_error(
+            &rustls::Error::NoCertificatesPresented
+        ));
+        assert!(!is_tls_certificate_error(&std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "fixture refused connection"
+        )));
+        assert!(!is_tls_certificate_error(&std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "invalid peer certificate: misleading plain text"
+        )));
+    }
+
+    #[test]
+    fn cancelled_start_does_not_spawn_a_backend() {
+        let config = WebuiLaunchConfig::from_deploy_config(None);
+        let cancelled = AtomicBool::new(true);
+        assert!(ManagedBackend::new(&config, &cancelled).is_err());
+    }
+
+    #[test]
+    fn startup_timeout_preserves_last_http_failure() {
+        let timeout = BackendStartupTimeout {
+            port: 22267,
+            last_error: "TLS certificate validation failed: invalid peer certificate".into(),
+        };
+        let message = timeout.to_string();
+        assert!(message.contains("22267"));
+        assert!(message.contains("invalid peer certificate"));
+    }
+
     /// 启动超时阈值应为 5 分钟，覆盖依赖同步等慢启动场景。
     #[test]
     fn backend_startup_timeout_is_five_minutes() {
@@ -617,7 +733,11 @@ mod tests {
     /// 超时错误可被精确识别，且不会误判其他 `anyhow` 错误。
     #[test]
     fn backend_startup_timeout_is_identified_without_matching_other_errors() {
-        let timeout: anyhow::Error = BackendStartupTimeout { port: 22267 }.into();
+        let timeout: anyhow::Error = BackendStartupTimeout {
+            port: 22267,
+            last_error: "connection refused".into(),
+        }
+        .into();
 
         assert!(is_backend_startup_timeout(&timeout));
         assert!(!is_backend_startup_timeout(&anyhow!("other startup error")));
@@ -626,15 +746,21 @@ mod tests {
     #[test]
     fn failure_reason_is_extracted_from_a_real_gui_log_line() {
         // 与 rich 日志实际落盘格式一致：时间 | 级别 | 消息
-        let line = format!("2026-09-21 20:14:40.595 | ERROR | {BACKEND_FAILURE_LOG_MARKER}React 前端构建失败\r");
+        let line = format!(
+            "2026-09-21 20:14:40.595 | ERROR | {BACKEND_FAILURE_LOG_MARKER}React 前端构建失败\r"
+        );
 
-        assert_eq!(extract_failure_reason(&line).as_deref(), Some("React 前端构建失败"));
+        assert_eq!(
+            extract_failure_reason(&line).as_deref(),
+            Some("React 前端构建失败")
+        );
     }
 
     /// 多条失败记录并存时取最后一次（最新）的原因。
     #[test]
     fn failure_reason_uses_the_last_recorded_failure() {
-        let tail = format!("{BACKEND_FAILURE_LOG_MARKER}旧原因\n{BACKEND_FAILURE_LOG_MARKER}新原因\n");
+        let tail =
+            format!("{BACKEND_FAILURE_LOG_MARKER}旧原因\n{BACKEND_FAILURE_LOG_MARKER}新原因\n");
 
         assert_eq!(extract_failure_reason(&tail).as_deref(), Some("新原因"));
     }
@@ -661,7 +787,10 @@ mod tests {
         let tail = read_log_tail(&path).expect("tail");
 
         assert!(!tail.starts_with("xxxx"), "首行应从字符边界之后开始");
-        assert_eq!(extract_failure_reason(&tail).as_deref(), Some("依赖同步失败"));
+        assert_eq!(
+            extract_failure_reason(&tail).as_deref(),
+            Some("依赖同步失败")
+        );
     }
 
     /// 日志文件不存在时返回 `None` 而非报错。

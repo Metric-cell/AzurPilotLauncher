@@ -92,6 +92,8 @@ launcher_update:
   payload_missing: "启动器必须更新，但更新服务器没有提供 %{platform} 的安装包。"
 
 dialog:
+  stopping_startup: "正在停止启动"
+  stopping_startup_detail: "正在等待启动工作结束，现有 Python 环境将保留。"
   cleaning_env: "正在清理环境"
   cleaning_env_detail: "正在移除未完成的启动环境，下次启动会自动完全重建。"
   cleaning_wait: "请稍候，不要手动删除文件。"
@@ -167,6 +169,12 @@ autostart:
   set_failed: "设置开机自启动失败：%{error}"
 
 errors:
+  backend_startup_cancelled: "后端启动已取消。"
+  backend_tls_failed: "无法验证后端 HTTPS 证书，请检查证书信任及主机名：%{error}"
+  workspace_protected: "检测到本地开发修改，已停止发布更新；请使用 --skip-update 或独立发布目录。"
+  backend_port_in_use: "后端地址 %{host}:%{port} 已被占用或无法监听，请关闭冲突服务或更改端口：%{error}"
+  backend_invalid_tls: "HTTPS 必须同时配置 WebuiSSLKey 和 WebuiSSLCert。"
+  backend_invalid_port: "WebUI 端口必须在 1 到 65535 之间。"
   uv_not_found: "启动器未内置 uv，且系统 PATH 中找不到 uv"
   write_uv_failed: "写入内置 uv 到 %{path} 失败"
   requests_install_failed: "安装 deploy 基础依赖 requests 失败"

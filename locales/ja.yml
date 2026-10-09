@@ -92,6 +92,8 @@ launcher_update:
   payload_missing: "ランチャーの更新が必要ですが、%{platform} 用のパッケージがありません。"
 
 dialog:
+  stopping_startup: "起動を停止しています"
+  stopping_startup_detail: "起動処理の終了を待っています。既存の Python 環境は保持されます。"
   cleaning_env: "環境をクリーンアップ中"
   cleaning_env_detail: "未完了の起動環境を削除しています。次回起動時に自動的に完全に再構築されます。"
   cleaning_wait: "しばらくお待ちください。手動でファイルを削除しないでください。"
@@ -167,6 +169,12 @@ autostart:
   set_failed: "自動起動の設定に失敗しました：%{error}"
 
 errors:
+  backend_startup_cancelled: "バックエンドの起動はキャンセルされました。"
+  backend_tls_failed: "バックエンドの HTTPS 証明書を検証できません。証明書の信頼設定とホスト名を確認してください：%{error}"
+  workspace_protected: "ローカルの開発変更を検出したため更新を停止しました。--skip-update または独立した配布ディレクトリを使用してください。"
+  backend_port_in_use: "バックエンド %{host}:%{port} は使用中か待ち受けできません。競合するサービスを終了するかポートを変更してください：%{error}"
+  backend_invalid_tls: "HTTPS には WebuiSSLKey と WebuiSSLCert の両方が必要です。"
+  backend_invalid_port: "WebUI のポートは 1 から 65535 の範囲で指定してください。"
   uv_not_found: "ランチャーに内蔵 uv がなく、システム PATH からも uv が見つかりません"
   write_uv_failed: "内蔵 uv の %{path} への書き込みに失敗しました"
   requests_install_failed: "deploy の基本依存 requests のインストールに失敗しました"

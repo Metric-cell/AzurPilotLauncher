@@ -42,6 +42,7 @@ dependencies = [
  "rand 0.8.5",
  "reqwest",
  "rust-i18n",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",
