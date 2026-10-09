@@ -1,10 +1,12 @@
 //! 后端进程托管模块：负责 gui.py（AzurPilot WebUI）子进程的完整生命周期。
-//! 启动前检查实际监听地址是否可用，绝不终止无法证明归属的占用进程。
-//! 子进程使用独立进程组，仅凭持有的句柄回收本次后端及其派生进程。
+//! 启动前先清理占用目标端口的残留进程，再以进程组方式拉起 Python 解释器，
+//! 并注入 `ALAS_LAUNCHER_PID` 环境变量标记子进程归属，便于退出时兜底回收。
+//! main.rs 在启动流程中调用 [`ManagedBackend::new`] 拉起后端，退出时依赖
+//! [`ManagedBackend`] 的 [`Drop`] 实现杀掉遗留子进程，防止进程泄漏。
 
 use std::{
+    collections::BTreeSet,
     io::Read as _,
-    net::{TcpListener, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
     sync::atomic::{AtomicBool, Ordering},
@@ -16,7 +18,7 @@ use anyhow::{anyhow, Result};
 use chrono::Local;
 use command_group::{CommandGroup, GroupChild};
 use serde_json::Value as JsonValue;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::setup::{alas_repo_dir, isolate_python_child_environment, venv_python};
 use crate::window_util::CreateNoWindow as _;
@@ -294,7 +296,8 @@ fn value_as_string_list(value: &JsonValue) -> Vec<String> {
 /// 托管中的 gui.py 子进程句柄。
 ///
 /// 持有进程组的 [`GroupChild`]，使终止操作能连同 gui.py 派生的孙进程
-/// （例如 uvicorn worker）一并结束，不依赖共享的启动器 PID 环境变量扫描。
+/// （例如 uvicorn worker）一并结束；子进程的归属另通过 `ALAS_LAUNCHER_PID`
+/// 环境变量在进程表层面标记，供 `Drop` 兜底回收使用。
 pub struct ManagedBackend {
     /// 进程组子进程句柄；`None` 表示已被 [`ManagedBackend::terminate`]
     /// 取走或从未成功拉起，此时 `Drop` 不再重复强杀。
@@ -305,16 +308,18 @@ pub struct ManagedBackend {
 impl ManagedBackend {
     /// 按配置启动 gui.py 并阻塞等待其 WebUI 端口就绪。
     ///
-    /// 检查监听地址、启动进程组，再等待 HTTP(S) 服务回应。
-    /// 失败和超时路径均回收本次启动的进程组，不处理已有用户服务。
+    /// 清理目标端口的占用进程、设置 `ALAS_LAUNCHER_PID` 归属标记，
+    /// 以进程组启动后端，再等待 HTTP(S) 服务回应。
     ///
     /// # Errors
     ///
-    /// 配置无效、监听地址占用、进程启动失败、提前退出或就绪超时均返回错误。
+    /// 配置无效、进程启动失败、提前退出、用户取消或就绪超时均返回错误。
     pub fn new(config: &WebuiLaunchConfig, cancel_requested: &AtomicBool) -> Result<Self> {
         check_startup_cancelled(cancel_requested)?;
         config.validate()?;
-        ensure_listener_available(config)?;
+        std::env::set_var("ALAS_LAUNCHER_PID", std::process::id().to_string());
+        kill_processes_using_port(config.port)?;
+        check_startup_cancelled(cancel_requested)?;
         let client = config.http_client(Duration::from_millis(500))?;
         let url = config.backend_url()?;
 
@@ -322,7 +327,6 @@ impl ManagedBackend {
         let mut command = Command::new(venv_python());
         command.args(config.args());
         command.current_dir(alas_repo_dir());
-        command.env("ALAS_LAUNCHER_PID", std::process::id().to_string());
         // 注入启动器信任密钥，WebUI 据此为启动器窗口开启免密；子进程缺省继承，
         // isolate_python_child_environment 不清理该键。
         command.env(TRUST_SECRET_ENV, launcher_trust_secret());
@@ -386,35 +390,233 @@ impl ManagedBackend {
     /// Unix 上先向进程组发送 `SIGTERM` 并给予 500 毫秒优雅退出窗口，仍未
     /// 退出才强杀；Windows 没有 SIGTERM 语义，直接强杀。子进程句柄已被取走
     /// 或从未拉起时，返回默认的 `ExitStatus`（视同正常退出）。
-    /// 子进程组长已退出时也会回收组内遗留进程；失败时保留句柄供 Drop 重试。
     ///
     /// # Errors
     ///
     /// 强杀或回收退出状态失败（例如句柄已失效、等待被中断）时返回错误。
     pub fn terminate(&mut self) -> Result<ExitStatus> {
-        if let Some(child) = self.child.as_mut() {
+        // take() 让 self.child 变为 None：无论后续成败，本函数只会执行一次，
+        // Drop 也不会再对同一进程重复 kill。
+        if let Some(mut child) = self.child.take() {
             #[cfg(unix)]
             {
                 use command_group::{Signal, UnixChildExt};
+                // 先礼后兵：SIGTERM 让 uvicorn 有机会清理子资源；忽略发送
+                // 失败（进程可能已退出），由下方的强杀兜底。
                 let _ = child.signal(Signal::SIGTERM);
                 let start_time = std::time::Instant::now();
                 while start_time.elapsed() < Duration::from_millis(500) {
-                    if let Some(status) = child.try_wait()? {
-                        // 仍强杀进程组，以清理已退出组长留下的孙进程。
-                        kill_owned_group(child)?;
-                        self.child.take();
-                        return Ok(status);
+                    if let Ok(Some(exit_status)) = child.try_wait() {
+                        return Ok(exit_status);
                     }
-                    sleep(Duration::from_millis(50));
+                    sleep(Duration::from_millis(100));
+                }
+                warn!("gui.py didn't exit, killing it...");
+            }
+            // 兜底强杀：SIGTERM 窗口超时，或平台本就没有优雅退出语义。
+            child.kill()?;
+            Ok(child.wait()?)
+        } else {
+            // 没有可终止的子进程（未启动或已回收），按"正常退出"处理。
+            Ok(ExitStatus::default())
+        }
+    }
+}
+
+/// 清理占用指定 TCP 端口的所有进程，并等待端口真正释放。
+///
+/// ALAS 非正常退出时常遗留占用 WebUI 端口的 Python 进程，不清掉会导致
+/// 新后端绑定端口失败。扫描失败视为可容忍路径（仅告警后放行），因为端口
+/// 本就可能无人占用；同时跳过 PID 0 与启动器自身，避免误杀。
+///
+/// # Errors
+///
+/// 当前实现把扫描失败一律降级为告警并返回 `Ok(())`，实际不会向调用方
+/// 传递 `Err`；保留 `Result` 签名以便未来收紧失败策略。
+fn kill_processes_using_port(port: u16) -> Result<()> {
+    // 扫描失败不算致命：端口很可能本来就没被占用，直接放行启动流程。
+    let pids = match pids_using_tcp_port(port) {
+        Ok(pids) => pids,
+        Err(e) => {
+            warn!("Unable to scan processes using port {}: {}", port, e);
+            return Ok(());
+        }
+    };
+    if pids.is_empty() {
+        return Ok(());
+    }
+
+    let current_pid = std::process::id();
+    let sys = sysinfo::System::new_all();
+    // PID 0 是系统空闲进程；current_pid 是启动器自身（自身也可能出现在
+    // 监听列表的瞬时快照中），二者都绝不能杀。
+    for pid in pids {
+        if pid == 0 || pid == current_pid {
+            continue;
+        }
+
+        let sys_pid = sysinfo::Pid::from_u32(pid);
+        match sys.process(sys_pid) {
+            Some(process) => {
+                info!(
+                    "Killing process {} ({}) using configured WebUI port {}",
+                    pid,
+                    process.name().to_string_lossy(),
+                    port
+                );
+                // sysinfo 的 kill 跨平台一致（Windows TerminateProcess，
+                // Unix SIGKILL），无需分支处理。
+                if !process.kill() {
+                    warn!("Failed to kill process {} using port {}", pid, port);
                 }
             }
-            // 失败时保留句柄，Drop 仍能重试回收。
-            kill_owned_group(child)?;
-            let status = child.wait()?;
-            self.child.take();
-            Ok(status)
-        } else {
-            Ok(ExitStatus::default())
+            None => {
+                // 快照建立后目标进程刚好自行退出，无需处理。
+                warn!(
+                    "Process {} was using port {}, but exited before it could be killed",
+                    pid, port
+                );
+            }
+        }
+    }
+
+    // 等待端口真正释放后再返回：内核回收监听 socket 有延迟，立即启动
+    // 新后端可能绑定失败；5 秒上限防止极端残留拖死启动流程。
+    let start_time = std::time::Instant::now();
+    while start_time.elapsed() < Duration::from_secs(5) {
+        match pids_using_tcp_port(port) {
+            Ok(pids) if pids.is_empty() => return Ok(()),
+            Ok(_) => sleep(Duration::from_millis(100)),
+            Err(e) => {
+                warn!("Unable to verify port {} was released: {}", port, e);
+                return Ok(());
+            }
+        }
+    }
+
+    warn!("Timed out waiting for port {} to be released", port);
+    Ok(())
+}
+
+/// 列出当前监听指定 TCP 端口的进程 PID 集合（Windows 实现）。
+///
+/// 选用 `netstat -ano -p tcp`：Windows 自带、无需第三方依赖；
+/// Unix 平台的同名函数改用 `lsof`，见 `#[cfg(unix)]` 版本。
+///
+/// # Errors
+///
+/// `netstat` 无法启动（不在 PATH 中）或以非零状态退出时返回错误。
+#[cfg(windows)]
+fn pids_using_tcp_port(port: u16) -> Result<BTreeSet<u32>> {
+    let output = Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .create_no_window()
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!("netstat failed with status {}", output.status));
+    }
+
+    Ok(parse_windows_netstat_pids(&output.stdout, port))
+}
+
+/// 解析 `netstat -ano -p tcp` 的输出，返回监听目标端口的所有 PID。
+///
+/// netstat 的数据行格式为 `协议 本地地址 外部地址 状态 PID`（至少 5 列，
+/// 另有表头与分隔行），因此必须同时满足：首列为 `TCP`、状态列为
+/// `LISTENING`、本地地址列（第 2 列）的端口与目标一致，此时末列才是
+/// 可解析的 PID；`-a` 会列出全部连接，必须靠状态列过滤。
+#[cfg(windows)]
+fn parse_windows_netstat_pids(output: &[u8], port: u16) -> BTreeSet<u32> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .filter_map(|line| {
+            // netstat 行形如 "TCP    0.0.0.0:22267   0.0.0.0:0  LISTENING  1234"；
+            // 表头行、分隔行与非 LISTENING 行都不满足下列条件，直接过滤。
+            let parts: Vec<_> = line.split_whitespace().collect();
+            if parts.len() < 5
+                || !parts[0].eq_ignore_ascii_case("TCP")
+                || !parts[3].eq_ignore_ascii_case("LISTENING")
+                || !local_address_uses_port(parts[1], port)
+            {
+                return None;
+            }
+            // 通过全部校验后，末列即 PID。
+            parts.last()?.parse::<u32>().ok()
+        })
+        .collect()
+}
+
+/// 列出当前监听指定 TCP 端口的进程 PID 集合（Unix 实现）。
+///
+/// 选用 `lsof -nP -iTCP:{port} -sTCP:LISTEN -t`：`-t` 只输出 PID（省去
+/// 表头）、`-nP` 跳过主机名与端口名的反解以加速；Windows 上 lsof 不可用，
+/// 故同名函数基于 `netstat` 文本解析实现。
+///
+/// # Errors
+///
+/// `lsof` 命令无法启动时返回错误；注意 lsof 在"无进程监听该端口"时也会
+/// 以非零状态退出且输出为空，这是正常情况，此处返回空集合而非错误。
+#[cfg(unix)]
+fn pids_using_tcp_port(port: u16) -> Result<BTreeSet<u32>> {
+    let output = Command::new("lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+        .create_no_window()
+        .output()?;
+    // 非零退出码 + 空 stdout 是 lsof 表示"没有匹配进程"的方式，不是故障。
+    if !output.status.success() && output.stdout.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    // 输出每行一个 PID；空行与无法解析的行直接忽略。
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect())
+}
+
+/// 判断 netstat 的"本地地址"列是否指向目标端口。
+///
+/// 用 `rsplit_once(':')` 从右侧切出端口：IPv6 监听地址形如 `[::]:22267`，
+/// 只有从右往左切才能正确越过方括号内的冒号。
+#[cfg(windows)]
+fn local_address_uses_port(address: &str, port: u16) -> bool {
+    address
+        .rsplit_once(':')
+        .and_then(|(_, port_part)| port_part.parse::<u16>().ok())
+        == Some(port)
+}
+
+/// 兜底回收：无论 `ManagedBackend` 因何种路径被丢弃，都确保 gui.py 不残留。
+///
+/// `Drop` 在正常返回、错误传播与 panic 展开等所有路径上都会执行，因此即使
+/// 启动中途失败（例如端口等待超时、调用方提前丢弃句柄），已拉起的子进程
+/// 也会在此被终止。除直接 `kill` 进程组外，还会扫描全系统进程表，按
+/// `ALAS_LAUNCHER_PID` 环境变量找出"归属当前启动器、但句柄已随失败路径
+/// 丢失"的子进程一并回收，这是防止进程泄漏的最后防线。
+impl Drop for ManagedBackend {
+    fn drop(&mut self) {
+        // child 仍为 Some 说明尚未走过 terminate（terminate 会 take 掉句柄），
+        // 直接强杀进程组即可；失败仅告警，不阻断后续的泄漏扫描。
+        if let Some(mut child) = self.child.take() {
+            match child.kill() {
+                Ok(_) => {}
+                Err(e) => warn!("Failed to kill gui.py process: {:?}", e),
+            }
+        }
+        // 扫描潜在泄漏的进程：启动失败等路径可能拿不到子进程句柄，此时只能
+        // 依据 ALAS_LAUNCHER_PID 环境变量在进程表层面反查归属并补杀。
+        let sys = sysinfo::System::new_all();
+        for (pid, process) in sys.processes() {
+            for var in process.environ() {
+                // 启动器自身的进程环境里同样带有该变量（set_var 设置的就是
+                // 本进程，子进程只是继承），必须排除自身 PID，否则会误杀自己。
+                if pid.as_u32() != std::process::id()
+                    && var.to_str().unwrap_or_default()
+                        == format!("ALAS_LAUNCHER_PID={}", std::process::id())
+                {
+                    process.kill();
+                }
+            }
         }
     }
 }
@@ -445,46 +647,6 @@ fn check_startup_cancelled(cancel_requested: &AtomicBool) -> Result<()> {
     } else {
         Ok(())
     }
-}
-
-/// 已不存在的 Unix 进程组视为已回收；其余错误保留句柄并传播。
-fn kill_owned_group(child: &mut GroupChild) -> std::io::Result<()> {
-    match child.kill() {
-        #[cfg(unix)]
-        Err(error) if error.raw_os_error() == Some(nix::libc::ESRCH) => Ok(()),
-        result => result,
-    }
-}
-
-/// 只回收当前句柄拥有的进程组；不扫描共享环境标记，避免旧实例误杀新实例。
-impl Drop for ManagedBackend {
-    fn drop(&mut self) {
-        if let Err(error) = self.terminate() {
-            warn!("Failed to stop gui.py process group: {error:#}");
-        }
-    }
-}
-
-/// 检查实际监听地址能否绑定。检查不会终止任何占用端口的进程。
-fn ensure_listener_available(config: &WebuiLaunchConfig) -> Result<()> {
-    let addresses: Vec<_> = (config.listen_host(), config.port)
-        .to_socket_addrs()?
-        .collect();
-    if addresses.is_empty() {
-        return Err(anyhow!("No listening address resolved for {}", config.host));
-    }
-    let mut listeners = Vec::new();
-    for address in addresses {
-        listeners.push(TcpListener::bind(address).map_err(|error| {
-            anyhow!(rust_i18n::t!(
-                "errors.backend_port_in_use",
-                host = config.host.as_str(),
-                port = config.port,
-                error = error.to_string()
-            ))
-        })?);
-    }
-    Ok(())
 }
 
 /// 将子进程异常退出表述为可读原因：优先取 gui.py 写在日志里的失败原因，
@@ -562,8 +724,16 @@ fn extract_failure_reason(log_tail: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
-    fn wait_for_fixture(condition: impl Fn() -> bool) {
+    struct ProcessFixture(std::process::Child);
+
+    impl Drop for ProcessFixture {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn wait_for_fixture(mut condition: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !condition() {
             assert!(std::time::Instant::now() < deadline, "fixture timed out");
@@ -571,84 +741,90 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn terminate_cleans_descendants_after_group_leader_exits() {
-        let directory = tempfile::tempdir().unwrap();
-        let heartbeat = directory.path().join("heartbeat");
-        let pid_file = directory.path().join("pid");
-        let child = Command::new("sh")
-            .args(["-c", "sh -c 'trap \"\" TERM; while :; do echo tick >> \"$1\"; sleep 0.05; done' fixture \"$1\" & echo $! > \"$2\"", "fixture"])
-            .arg(&heartbeat)
-            .arg(&pid_file)
+    fn spawn_process_fixture(mode: &str, ready: &Path, marked: bool) -> ProcessFixture {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "backend::tests::process_cleanup_fixture",
+                "--nocapture",
+            ])
+            .env("AZURPILOT_PROCESS_FIXTURE_MODE", mode)
+            .env("AZURPILOT_PROCESS_FIXTURE_READY", ready)
+            .env_remove("ALAS_LAUNCHER_PID")
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .group_spawn()
-            .unwrap();
-        let mut backend = ManagedBackend { child: Some(child) };
-        wait_for_fixture(|| heartbeat.exists() && pid_file.exists());
-        // 确保组长已被 try_wait 回收，孙进程仍持续运行。
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while backend
-            .child
-            .as_mut()
-            .unwrap()
-            .try_wait()
-            .unwrap()
-            .is_none()
-        {
-            assert!(std::time::Instant::now() < deadline);
-            sleep(Duration::from_millis(20));
+            .stderr(std::process::Stdio::null());
+        if marked {
+            command.env("ALAS_LAUNCHER_PID", std::process::id().to_string());
         }
-        let pid: u32 = std::fs::read_to_string(pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        backend.terminate().unwrap();
+        let fixture = ProcessFixture(command.create_no_window().spawn().unwrap());
         wait_for_fixture(|| {
-            let system = sysinfo::System::new_all();
-            system
-                .process(sysinfo::Pid::from_u32(pid))
-                .is_none_or(|process| {
-                    process.status() == sysinfo::ProcessStatus::Zombie
-                        || process.status() == sysinfo::ProcessStatus::Dead
-                })
+            std::fs::read_to_string(ready).is_ok_and(|content| content.parse::<u16>().is_ok())
         });
-        assert!(backend.child.is_none());
+        fixture
     }
 
-    #[cfg(unix)]
+    // 子测试进程只创建临时监听或等待退出，不启动真实 Python 后端。
     #[test]
-    fn dropping_backend_leaves_unrelated_same_launcher_pid_fixture_running() {
-        fn fixture() -> ManagedBackend {
-            let child = Command::new("sh")
-                .args(["-c", "while :; do sleep 1; done"])
-                .env("ALAS_LAUNCHER_PID", std::process::id().to_string())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .group_spawn()
-                .unwrap();
-            ManagedBackend { child: Some(child) }
+    fn process_cleanup_fixture() {
+        let Ok(mode) = std::env::var("AZURPILOT_PROCESS_FIXTURE_MODE") else {
+            return;
+        };
+        let ready = std::env::var_os("AZURPILOT_PROCESS_FIXTURE_READY").unwrap();
+        let listener =
+            (mode == "listener").then(|| std::net::TcpListener::bind("127.0.0.1:0").unwrap());
+        let port = listener
+            .as_ref()
+            .map(|listener| listener.local_addr().unwrap().port())
+            .unwrap_or_default();
+        std::fs::write(ready, port.to_string()).unwrap();
+        loop {
+            std::thread::park();
         }
-        let mut unrelated = fixture();
-        let owned = fixture();
-        assert!(unrelated
-            .child
-            .as_mut()
-            .unwrap()
-            .try_wait()
-            .unwrap()
-            .is_none());
-        drop(owned);
-        assert!(unrelated
-            .child
-            .as_mut()
-            .unwrap()
-            .try_wait()
-            .unwrap()
-            .is_none());
-        unrelated.terminate().unwrap();
+    }
+
+    #[test]
+    fn port_cleanup_ends_fixture_listener_and_releases_port() {
+        #[cfg(unix)]
+        if Command::new("lsof").arg("-v").output().is_err() {
+            warn!("Skipping port cleanup fixture because lsof is unavailable");
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let ready = directory.path().join("listener-port");
+        let mut fixture = spawn_process_fixture("listener", &ready, false);
+        let port = std::fs::read_to_string(&ready).unwrap().parse().unwrap();
+        assert!(pids_using_tcp_port(port).unwrap().contains(&fixture.0.id()));
+
+        kill_processes_using_port(port).unwrap();
+
+        wait_for_fixture(|| fixture.0.try_wait().unwrap().is_some());
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+    }
+
+    #[test]
+    fn dropping_backend_cleans_launcher_pid_marked_fixture() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut marked = spawn_process_fixture("idle", &directory.path().join("marked"), true);
+        let mut unmarked = spawn_process_fixture("idle", &directory.path().join("unmarked"), false);
+
+        drop(ManagedBackend { child: None });
+
+        wait_for_fixture(|| marked.0.try_wait().unwrap().is_some());
+        assert!(unmarked.0.try_wait().unwrap().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn netstat_parser_selects_only_target_port_listeners() {
+        let output = b"TCP 0.0.0.0:22267 0.0.0.0:0 LISTENING 1234\n\
+                       TCP [::]:22267 [::]:0 LISTENING 5678\n\
+                       TCP 127.0.0.1:22267 127.0.0.1:9999 ESTABLISHED 9999\n\
+                       TCP 0.0.0.0:22268 0.0.0.0:0 LISTENING 8888\n";
+        assert_eq!(
+            parse_windows_netstat_pids(output, 22267),
+            BTreeSet::from([1234, 5678])
+        );
     }
 
     #[test]
@@ -664,15 +840,6 @@ mod tests {
         config.host = "[::1]".into();
         assert_eq!(config.args()[2], "::1");
         assert_eq!(config.backend_url().unwrap(), "https://[::1]:22267/");
-    }
-
-    #[test]
-    fn occupied_listener_is_reported_and_left_running() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut config = WebuiLaunchConfig::from_deploy_config(None);
-        config.port = listener.local_addr().unwrap().port();
-        assert!(ensure_listener_available(&config).is_err());
-        assert!(std::net::TcpStream::connect(listener.local_addr().unwrap()).is_ok());
     }
 
     #[test]

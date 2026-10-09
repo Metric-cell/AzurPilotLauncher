@@ -172,7 +172,6 @@ errors:
   backend_startup_cancelled: "バックエンドの起動はキャンセルされました。"
   backend_tls_failed: "バックエンドの HTTPS 証明書を検証できません。証明書の信頼設定とホスト名を確認してください：%{error}"
   workspace_protected: "ローカルの開発変更を検出したため更新を停止しました。--skip-update または独立した配布ディレクトリを使用してください。"
-  backend_port_in_use: "バックエンド %{host}:%{port} は使用中か待ち受けできません。競合するサービスを終了するかポートを変更してください：%{error}"
   backend_invalid_tls: "HTTPS には WebuiSSLKey と WebuiSSLCert の両方が必要です。"
   backend_invalid_port: "WebUI のポートは 1 から 65535 の範囲で指定してください。"
   uv_not_found: "ランチャーに内蔵 uv がなく、システム PATH からも uv が見つかりません"

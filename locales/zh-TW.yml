@@ -172,7 +172,6 @@ errors:
   backend_startup_cancelled: "後端啟動已取消。"
   backend_tls_failed: "無法驗證後端 HTTPS 憑證，請檢查憑證信任及主機名稱：%{error}"
   workspace_protected: "偵測到本機開發修改，已停止發行更新；請使用 --skip-update 或獨立發行目錄。"
-  backend_port_in_use: "後端位址 %{host}:%{port} 已被佔用或無法監聽，請關閉衝突服務或更改連接埠：%{error}"
   backend_invalid_tls: "HTTPS 必須同時設定 WebuiSSLKey 和 WebuiSSLCert。"
   backend_invalid_port: "WebUI 連接埠必須介於 1 到 65535。"
   uv_not_found: "啟動器未內建 uv，且系統 PATH 中找不到 uv"

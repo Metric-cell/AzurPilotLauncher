@@ -172,7 +172,6 @@ errors:
   backend_startup_cancelled: "Backend startup was cancelled."
   backend_tls_failed: "Cannot verify the backend HTTPS certificate. Check certificate trust and hostname: %{error}"
   workspace_protected: "Local development changes detected; release update stopped. Use --skip-update or a separate deployment directory."
-  backend_port_in_use: "Cannot listen on backend address %{host}:%{port}. Close the conflicting service or change the port: %{error}"
   backend_invalid_tls: "HTTPS requires both WebuiSSLKey and WebuiSSLCert."
   backend_invalid_port: "The WebUI port must be between 1 and 65535."
   uv_not_found: "Launcher does not have built-in uv, and uv was not found in system PATH"

@@ -39,7 +39,7 @@ cargo check            # 仅检查编译
 |---|---|
 | `main.rs`（~4600 行） | Tauri 入口：splash/主窗口管理、托盘、时间炸弹、标题栏注入、错误页、Tauri 命令注册 |
 | `setup.rs`（~2600 行） | 环境搭建：Python/uv/adb/git 安装、git 更新（重试 20 次）、`uv sync`、deploy.yaml 迁移 |
-| `backend.rs`（~500 行） | `gui.py` 自有进程组生命周期、端口冲突检测、HTTP(S) 就绪与启动取消 |
+| `backend.rs` | `gui.py` 进程组生命周期、启动前端口占用清理、`ALAS_LAUNCHER_PID` 泄漏扫描、HTTP(S) 就绪与启动取消 |
 | `nodejs.rs`（~1000 行） | **仅 Windows**：检测系统级 Node.js，缺失时下载安装（SHA256 校验） |
 | `notify.rs`（~340 行） | 旧版 SSE 通知流（`/api/notify_stream`）能力检测、平台原生通知 |
 | `launcher_control.rs`（~160 行） | 旧版反向控制流（`/api/launcher/stream`）：开机自启指令与应答 |
@@ -60,7 +60,7 @@ cargo check            # 仅检查编译
 
 - 修复说明及验收见 [docs/launcher-fixes.md](docs/launcher-fixes.md)。
 - 后端 URL 使用同一份 `WebuiLaunchConfig`，通知流、免密、页面导航和重试必须保留 HTTPS/IPv6；不得通过关闭证书校验解决 TLS 问题。
-- 只回收 `ManagedBackend` 自己启动的进程组；其他服务占用端口时报告冲突，不按端口或工作目录强杀。
+- 进程清理已按用户要求恢复原策略：启动前按端口清理占用进程，退出时通过进程组及 `ALAS_LAUNCHER_PID` 扫描兜底回收。进程验证使用独立临时 fixture。
 - 开发检出和 `--skip-update` 保留配置与 `uv.lock`，跳过发布更新，依赖使用 `uv sync --frozen`；取消启动不得删除现有环境。
 - 当前后端未提供旧桌面通知/系统自启接口时停止订阅；`startup.set` 管理账号任务，不能当作系统自启接口使用。
 
