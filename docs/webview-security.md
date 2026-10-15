@@ -30,6 +30,7 @@
 | `window_minimize` | ✓ | ✓ | ✓ |
 | `window_toggle_maximize` | — | ✓ | ✓ |
 | `window_close` | ✓ | ✓ | ✓ |
+| `open_project_repository` | — | — | ✓ |
 | `get_launcher_preferences` | — | — | ✓ |
 | `set_launcher_close_behavior` | — | — | ✓ |
 | `window_choose_close_behavior` | — | ✓ | ✓ |
@@ -41,7 +42,7 @@
 
 ## 三层 IPC 验证
 
-1. `build.rs` 使用 `tauri_build::AppManifest::new().commands(COMMANDS)` 声明上表全部 15 个应用命令。Tauri 为其生成 `allow-save-as` 等权限。少了 AppManifest，锁定版本默认不会对自定义应用命令执行 capability 拦截。
+1. `build.rs` 使用 `tauri_build::AppManifest::new().commands(COMMANDS)` 声明上表全部 16 个应用命令。Tauri 为其生成 `allow-save-as` 等权限。少了 AppManifest，锁定版本默认不会对自定义应用命令执行 capability 拦截。
 2. `install_capabilities()` 在 setup 最开始安装按窗口限制的运行时 capability。splash/error 只使用 `local: true`；回环 backend 单独使用 `local: false` 和精确 origin 的 remote URLPattern。没有 `core:default`、通知或 dialog 的 JavaScript 权限；Rust 内部 dialog 调用不需要这些权限。新增命令必须同步 AppManifest、Rust 来源矩阵和审核测试。
 3. 每个命令的 `Caller` 从实际 `CommandItem` 获取 WebView，检查 window/webview label 一致、当前顶层 URL、命令角色及私有凭证。缺失状态、URL 读取失败和不合法参数通过 `Result` 拒绝，不依赖 panic。
 
@@ -74,6 +75,8 @@ Tauri 2.5.1 没有公开 Wry 的 new-window handler。`popup_guard` 通过 plugi
 安装失败会记录错误并关闭相关窗口。macOS 保留原有 Wry delegate 的上传文件面板，不替换整个 delegate。升级 Tauri/Wry 后须重审这些平台钩子；当前实现无需升级框架。
 
 document-start 脚本另外固定 `window.open()` 返回 `null`，拦截不允许来源的链接和表单，允许的链接/表单改为当前窗口。这是对原生 veto 的补充。全局 plugin `on_navigation` 负责统一来源限制，主窗口自己的导航回调继续执行相同策略和后端可达性检查。
+
+「开源项目」链接是单独的浏览器入口：可信后端主框架中的真实主键点击（含键盘激活）交给 `open_project_repository`，原生命令再次要求窗口可见。命令无 URL 参数，只能打开源码固定的 `https://github.com/Metric-cell/AzurPilot`；兼容旧版页面的原项目链接。Windows 使用初始化 COM 后的 `ShellExecuteExW`，macOS/Linux 分别使用 `open`/`xdg-open`；不把远端页面载入应用窗口。打开失败返回本地化提示，其余外部导航与原生弹窗策略保留。
 
 平台依赖须与锁文件中的底层库一致：Linux `webkit2gtk = "=2.0.1"`，Windows `webview2-com = "=0.37.0"`，macOS `objc2 = "=0.6.1"`。Linux 已实际编译；Windows/macOS 仍须在对应 CI 和桌面环境验收原生行为。
 

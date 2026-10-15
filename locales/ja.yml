@@ -171,6 +171,7 @@ autostart:
   set_failed: "自動起動の設定に失敗しました：%{error}"
 
 errors:
+  open_project_failed: "プロジェクトのページを開けませんでした：%{error}"
   save_launcher_preferences: "ランチャー設定を保存できません：%{error}"
   close_behavior_unsupported: "このシステムではバックグラウンド実行をサポートしていません。"
   backend_port_in_use: "バックエンドのポート %{port} は別のプログラムが使用しています。終了するかポートを変更してください。"

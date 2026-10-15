@@ -807,6 +807,7 @@ fn main() -> Result<()> {
         .manage(splash_state::SplashState::default())
         .manage(startup_state)
         .invoke_handler(tauri::generate_handler![
+            commands::open_project_repository,
             commands::save_as,
             commands::splash_ready,
             commands::download_today_gui_log,

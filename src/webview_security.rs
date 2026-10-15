@@ -24,6 +24,7 @@ pub const BACKEND_ERROR_URL_BASE: &str = "alas-error://localhost/backend";
 /// 也用于 build.rs 的 AppManifest；新增命令必须显式更新来源矩阵。
 #[cfg(test)]
 pub const APP_COMMANDS: &[&str] = &[
+    "open_project_repository",
     "get_launcher_preferences",
     "set_launcher_close_behavior",
     "window_choose_close_behavior",
@@ -62,6 +63,7 @@ const ERROR_COMMANDS: &[&str] = &[
     "window_is_maximized",
 ];
 const BACKEND_COMMANDS: &[&str] = &[
+    "open_project_repository",
     "get_launcher_preferences",
     "set_launcher_close_behavior",
     "window_choose_close_behavior",
@@ -330,6 +332,10 @@ impl WebviewPolicy {
             "errorUrl": self.error.as_str(),
             "backendOrigin": self.backend.origin().ascii_serialization(),
             "backendNative": self.backend_native,
+            "projectRepositoryLinks": [
+                crate::commands::PROJECT_REPOSITORY_URL,
+                "https://github.com/wess09/AzurPilot"
+            ],
             "commands": {
                 "splash": SPLASH_COMMANDS,
                 "error": ERROR_COMMANDS,
@@ -663,9 +669,10 @@ mod tests {
     }
 
     #[test]
-    fn close_preferences_are_only_available_to_the_trusted_main_frame() {
+    fn backend_settings_and_project_links_require_the_trusted_main_frame() {
         let policy = policy();
         for command in [
+            "open_project_repository",
             "get_launcher_preferences",
             "set_launcher_close_behavior",
             "window_choose_close_behavior",

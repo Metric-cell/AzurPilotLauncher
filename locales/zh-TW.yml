@@ -171,6 +171,7 @@ autostart:
   set_failed: "設定開機自動啟動失敗：%{error}"
 
 errors:
+  open_project_failed: "無法開啟專案網頁：%{error}"
   save_launcher_preferences: "無法儲存啟動器設定：%{error}"
   close_behavior_unsupported: "目前系統不支援背景執行。"
   backend_port_in_use: "後端連接埠 %{port} 已被其他程式占用，請關閉該程式或修改連接埠。"

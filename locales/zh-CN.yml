@@ -171,6 +171,7 @@ autostart:
   set_failed: "设置开机自启动失败：%{error}"
 
 errors:
+  open_project_failed: "无法打开项目网页：%{error}"
   save_launcher_preferences: "无法保存启动器设置：%{error}"
   close_behavior_unsupported: "当前系统不支持后台运行。"
   backend_port_in_use: "后端端口 %{port} 已被其他程序占用，请关闭该程序或修改端口。"

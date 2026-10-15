@@ -26,6 +26,7 @@ Windows/macOS 有托盘，首次关闭询问退出或后台运行，保存后按
 - Windows 普通用户运行；Node 只安装到当前用户数据目录，命令使用 `CreateNoWindow`。
 - 自更新默认禁用；启用方式与签名工具见 [update-security.md](docs/update-security.md)。发行私钥不得嵌入客户端。
 - 自定义原生命令须同时登记 build.rs AppManifest 和 WebView 角色矩阵；不授予网页默认 core/plugin 权限。
+- 「开源项目」通过固定目标的 `open_project_repository` 在系统浏览器打开个人仓库；仅可信可见的后端主框架可调用，网页不能传入任意 URL。
 - 新窗口须安装 `popup_guard`；注入脚本须校验当前来源和主框架 bridge。内部 HTML 只能通过 `ui::html_response` 返回，动态 JSON 使用 script 上下文转义。
 - 后端 URL 保留 HTTPS 和 IPv6；不关闭证书检查。免密、自启反控和通知只面向精确回环来源。
 - 只能终止本次持有的进程内核身份；端口、环境标记、进程名不能用于授权杀进程。

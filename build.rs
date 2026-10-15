@@ -28,6 +28,7 @@ fn main() {
 "#,
     );
     const COMMANDS: &[&str] = &[
+        "open_project_repository",
         "save_as",
         "splash_ready",
         "download_today_gui_log",

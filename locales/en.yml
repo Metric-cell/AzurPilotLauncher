@@ -171,6 +171,7 @@ autostart:
   set_failed: "Failed to set autostart: %{error}"
 
 errors:
+  open_project_failed: "Could not open the project page: %{error}"
   save_launcher_preferences: "Could not save launcher settings: %{error}"
   close_behavior_unsupported: "Background operation is not supported on this system."
   backend_port_in_use: "Backend port %{port} is used by another program. Close it or change the port."
