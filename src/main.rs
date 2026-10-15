@@ -1783,27 +1783,16 @@ fn reveal_window(window: &WebviewWindow) -> tauri::Result<()> {
 
 /// 把主窗口最小化到托盘（按平台采取不同策略）。
 ///
-/// 平台差异：Windows 上直接销毁窗口以释放 WebView 资源（恢复时重建）；
-/// macOS/Linux 仅隐藏窗口；macOS 额外切换到 Accessory 激活策略以隐藏
-/// Dock 图标。
+/// Windows/macOS 保留窗口和 WebView，仅隐藏以便即时恢复页面与连接；
+/// macOS 额外切换到 Accessory 激活策略以隐藏 Dock 图标。
+/// Linux 的隐藏命令另行映射为普通最小化，不会进入托盘。
 fn minimize_main_window_to_tray(app: &tauri::AppHandle) {
     if !app.state::<startup_state::StartupState>().can_show_main() {
         return;
     }
-    #[cfg(windows)]
-    {
-        if let Some(window) = app.get_webview_window("main") {
-            info!("Destroying main window to release WebView resources while trayed");
-            if let Err(e) = window.destroy() {
-                warn!("Failed to destroy main window for tray mode: {:?}", e);
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.hide();
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(error) = window.hide() {
+            warn!("Failed to hide main window for tray mode: {error}");
         }
     }
 
@@ -1827,8 +1816,8 @@ fn restore_main_window_from_any_thread(
     }
 }
 
-/// 从托盘恢复主窗口：窗口仍存在则直接显示并聚焦；已被销毁（Windows 托盘
-/// 化会销毁窗口）则以防重入标志保护，在新线程中重建并导航。
+/// 从托盘恢复主窗口：通常直接显示并聚焦保留的窗口；窗口意外丢失时，
+/// 仍以防重入标志保护，在新线程中重建并导航。
 fn restore_main_window_from_tray(
     app: &tauri::AppHandle,
     port: u16,
