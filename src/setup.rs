@@ -3074,6 +3074,13 @@ sys.modules['deploy.git'] = module
         git(&["config", "user.email", "fixture@example.invalid"]);
         git(&["config", "user.name", "Fixture"]);
         fs::write(root.join(".gitignore"), "config/\nlog/\n.venv/\n").unwrap();
+        // 显式固定夹具分支，避免依赖发行模板的默认分支。
+        fs::create_dir(root.join("config")).unwrap();
+        fs::write(
+            root.join("config/deploy.yaml"),
+            "Deploy:\n  Git:\n    Branch: master\n",
+        )
+        .unwrap();
         fs::write(root.join("source.txt"), "published").unwrap();
         git(&["add", "."]);
         git(&["commit", "-m", "published"]);

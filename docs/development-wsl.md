@@ -4,7 +4,18 @@ WSL 启动器开发环境
 
 **本机配置**
 
-工作区为 `/home/dreamydust/Azurpilot`，启动器在 `launcher/`，Python 后端在 `dev-wsl/`。Rust 工具安装在用户的 `~/.cargo/bin`、`~/.rustup`；rustup 已在 `~/.profile` 和 `~/.bashrc` 加载 Cargo 环境。旧终端可以运行：
+工作区为 `/home/dreamydust/Azurpilot`，启动器在 `launcher/`，Python 后端在 `dev-wsl/`。后端使用个人仓库 [Metric-cell/AzurPilot](https://github.com/Metric-cell/AzurPilot/tree/deploy) 的 `deploy` 分支，`origin` 指向该仓库。六个平台部署模板及 CI 打包的引导部署代码均使用此来源；国内模板保留 PyPI 镜像，但后端代码直接从个人 GitHub 仓库拉取。
+
+本地后端已重新建立 `.venv/` 和 React 静态资源，`config/deploy.yaml` 同样指向个人仓库的 `deploy` 分支，WebUI 监听 `127.0.0.1:25548`。启动后端：
+
+```bash
+cd /home/dreamydust/Azurpilot/dev-wsl
+uv run --frozen python gui.py
+```
+
+Node.js 24 安装在 `~/.local/share/nodejs/`，`node`、`npm`、`npx` 入口位于 `~/.local/bin/`。更新后端源码后，`gui.py` 会按源码指纹检查并在需要时重建前端。旧后端的虚拟环境、配置和日志已随目录替换删除。
+
+Rust 工具安装在用户的 `~/.cargo/bin`、`~/.rustup`；rustup 已在 `~/.profile` 和 `~/.bashrc` 加载 Cargo 环境。旧终端可以运行：
 
 ```bash
 source ~/.cargo/env
@@ -68,7 +79,7 @@ rustup toolchain install stable --profile minimal \
 cargo install tauri-cli --version '^2.0.0' --locked
 ```
 
-本地编译不需要发布 mTLS 证书：`build.rs` 会写空占位符；uv 已在 PATH 中，运行时可回退使用。本次只配置 Linux 开发环境，没有安装 Windows 编译链或更换后端部署。
+本地编译不需要发布 mTLS 证书：`build.rs` 会写空占位符；uv 已在 PATH 中，运行时可回退使用。本机配置 Linux 开发环境，未安装 Windows 编译链；当前后端来源与启动方式见上方本机配置。
 
 依据：[Tauri 系统依赖](https://v2.tauri.app/start/prerequisites/)、[Tauri Cargo CLI](https://v2.tauri.app/reference/cli/)、[rust-analyzer 安装说明](https://rust-analyzer.github.io/book/installation.html)及仓库 `.github/workflows/test.yml`。
 
@@ -83,3 +94,12 @@ cargo install tauri-cli --version '^2.0.0' --locked
 - `scripts/wsl-dev.sh dev` 已实际运行；修改开发脚本/触发源码变动后，Tauri 重新编译并重启窗口，仍携带隔离预览参数。完整后端与 Windows 运行尚未验收。
 
 环境安装记录中的检查针对原始源码，后续功能修复的验收见 [launcher-fixes.md](launcher-fixes.md)。源码仍有平台相关未使用代码警告。检查日志存放在 `target/wsl-validation/`，不纳入 Git。实际预览截图：[preview-configured.png](../target/wsl-validation/preview-configured.png)。
+
+**后端替换验收（2026-10-15）**
+
+- `dev-wsl/` 重新检出个人仓库的 `deploy` 分支，提交为 `5e3ba2aa10bb1e8f9380f23a9e42375d37d2c314`，工作区无源码修改。
+- `uv sync --frozen`、`npm ci --prefix frontend --no-audit --no-fund` 和 `npm run build --prefix frontend` 通过。
+- 后端的启动器通道、信任登录、静态资源和 clean 网络策略测试共 36 项通过；启动器 `setup::tests` 的 15 项部署测试通过。
+- 真实 `gui.py` 在本机临时端口启动，健康接口、React 页面及 JavaScript、启动器状态与免密登录通过，非回环 Host 被拒绝；验证后已停止，没有启动游戏任务。
+- 六个平台模板、CI 引导部署来源与本机配置校验通过；`scripts/wsl-dev.sh build --offline` 构建成功。
+- 本次修改的 `src/setup.rs` 通过 rustfmt 检查；全仓库格式检查仍有既有的 `src/nodejs.rs` 格式差异。

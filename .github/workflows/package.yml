@@ -275,7 +275,7 @@ jobs:
       - name: Get AzurPilot
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         run: |
-          git clone --depth=1 --filter=blob:none --sparse https://github.com/wess09/AzurPilot.git AzurLaneAutoScript
+          git clone --branch deploy --single-branch --depth=1 --filter=blob:none --sparse https://github.com/Metric-cell/AzurPilot.git AzurLaneAutoScript
           git -C AzurLaneAutoScript sparse-checkout set deploy
       - name: Distribute
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
