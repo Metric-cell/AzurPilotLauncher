@@ -110,6 +110,8 @@ dialog:
   nodejs_install_failed: "Node.js のインストールに失敗しました"
   nodejs_install_failed_detail: "Node.js を自動的にインストールできませんでした。再試行するか、手動でインストールしてください。\n\n%{error}"
   confirm_exit: "終了しますか？終了するか、バックグラウンドで実行し続けるか選択できます"
+  close_remember_hint: "この選択は記憶されます。システム設定で変更できます。"
+  close_save_failed: "閉じる動作を保存できませんでした。再試行してください。"
   exit: "終了"
   minimize_to_tray: "トレイに最小化"
   starting: "起動中"
@@ -169,6 +171,8 @@ autostart:
   set_failed: "自動起動の設定に失敗しました：%{error}"
 
 errors:
+  save_launcher_preferences: "ランチャー設定を保存できません：%{error}"
+  close_behavior_unsupported: "このシステムではバックグラウンド実行をサポートしていません。"
   backend_port_in_use: "バックエンドのポート %{port} は別のプログラムが使用しています。終了するかポートを変更してください。"
   backend_invalid_host: "WebUI ホストが無効です。単一のホスト名または IP アドレスを入力してください。"
   nodejs_user_data_dir_not_found: "現在のユーザーのローカルデータディレクトリが見つかりません。"

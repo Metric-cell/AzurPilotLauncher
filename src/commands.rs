@@ -19,7 +19,10 @@ use tauri::{Manager, State, Url, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tracing::{error, info};
 
-use crate::webview_security::Caller;
+use crate::{
+    preferences::{CloseBehavior, PreferenceStore, PreferencesSnapshot, BACKGROUND_SUPPORTED},
+    webview_security::Caller,
+};
 
 /// 同时限制 IPC 解码产生的附加内存与 JS FileReader 输入。
 pub const MAX_EXPORT_BYTES: usize = 32 * 1024 * 1024;
@@ -402,6 +405,69 @@ pub fn window_toggle_maximize(caller: Caller) -> Result<bool, String> {
 #[tauri::command]
 pub fn window_close(caller: Caller) -> Result<(), String> {
     caller.window().close().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn get_launcher_preferences(
+    caller: Caller,
+    preferences: State<'_, PreferenceStore>,
+) -> Result<PreferencesSnapshot, String> {
+    caller.require_visible()?;
+    Ok(preferences.snapshot())
+}
+
+#[tauri::command]
+pub fn set_launcher_close_behavior(
+    caller: Caller,
+    preferences: State<'_, PreferenceStore>,
+    behavior: CloseBehavior,
+) -> Result<PreferencesSnapshot, String> {
+    caller.require_visible()?;
+    save_close_behavior(&preferences, behavior)?;
+    Ok(preferences.snapshot())
+}
+
+fn save_close_behavior(
+    preferences: &PreferenceStore,
+    behavior: CloseBehavior,
+) -> Result<(), String> {
+    if behavior == CloseBehavior::Tray && !BACKGROUND_SUPPORTED {
+        return Err(rust_i18n::t!("errors.close_behavior_unsupported").to_string());
+    }
+    preferences.set_close_behavior(behavior).map_err(|error| {
+        rust_i18n::t!(
+            "errors.save_launcher_preferences",
+            error = error.to_string()
+        )
+        .to_string()
+    })
+}
+
+/// 首次关闭的选择必须先成功保存，再执行；写入失败时保留窗口以便重试。
+#[tauri::command]
+pub fn window_choose_close_behavior(
+    caller: Caller,
+    services: State<'_, CommandServices>,
+    preferences: State<'_, PreferenceStore>,
+    behavior: CloseBehavior,
+) -> Result<(), String> {
+    caller.require_visible()?;
+    if behavior == CloseBehavior::Ask {
+        return Err("Choose a close action before continuing".into());
+    }
+    save_close_behavior(&preferences, behavior)?;
+    match behavior {
+        CloseBehavior::Exit => {
+            services.allow_exit.store(true, Ordering::SeqCst);
+            caller.window().app_handle().exit(0);
+        }
+        CloseBehavior::Tray => {
+            #[cfg(not(target_os = "linux"))]
+            (services.hide_window)(caller.window());
+        }
+        CloseBehavior::Ask => unreachable!(),
+    }
+    Ok(())
 }
 
 #[tauri::command]

@@ -110,6 +110,8 @@ dialog:
   nodejs_install_failed: "Node.js 安裝失敗"
   nodejs_install_failed_detail: "無法自動安裝 Node.js。請重試或手動安裝。\n\n%{error}"
   confirm_exit: "確認要離開嗎？您可以選擇退出，或者讓它在背景默默執行"
+  close_remember_hint: "將記住此選擇，可在系統設定中變更。"
+  close_save_failed: "無法儲存關閉選項，請重試。"
   exit: "退出"
   minimize_to_tray: "最小化到系統匣"
   starting: "正在啟動"
@@ -169,6 +171,8 @@ autostart:
   set_failed: "設定開機自動啟動失敗：%{error}"
 
 errors:
+  save_launcher_preferences: "無法儲存啟動器設定：%{error}"
+  close_behavior_unsupported: "目前系統不支援背景執行。"
   backend_port_in_use: "後端連接埠 %{port} 已被其他程式占用，請關閉該程式或修改連接埠。"
   backend_invalid_host: "WebUI 主機名稱無效，請填寫單一主機名稱或 IP 位址。"
   nodejs_user_data_dir_not_found: "無法定位目前使用者的本機資料目錄。"

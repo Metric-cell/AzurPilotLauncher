@@ -7,6 +7,8 @@ rust_i18n::i18n!("locales", fallback = "en");
 mod commands;
 #[path = "../src/popup_guard.rs"]
 mod popup_guard;
+#[path = "../src/preferences.rs"]
+mod preferences;
 #[path = "../src/ui/mod.rs"]
 mod ui;
 #[path = "../src/webview_security.rs"]

@@ -15,8 +15,8 @@
 //!   覆盖 window.saveAs 改走 Tauri save_as 命令、阻止浏览器后退；
 //! - 时间炸弹：运行时从内嵌 Cargo.toml 解析过期配置，经 HTTP Date 头获取
 //!   网络时间比对，过期则弹窗并阻止启动；
-//! - 三平台关闭行为：Windows 弹出窗口内"退出/最小化到托盘"选择菜单，
-//!   macOS 最小化到托盘并隐藏 Dock 图标，Linux 关闭窗口退出。
+//! - 三平台关闭行为：Windows/macOS 首次询问后保存退出或后台偏好，
+//!   Linux 关闭窗口退出；可在系统设置中修改关闭偏好。
 
 // 在 Windows 上不创建默认控制台窗口
 #![windows_subsystem = "windows"]
@@ -35,6 +35,7 @@ mod nodejs;
 /// SSE 通知流：接收后端推送的系统通知与点击回调。
 mod notify;
 mod popup_guard;
+mod preferences;
 mod process_security;
 /// 首次启动环境准备（deploy.yaml、仓库克隆/更新、依赖同步）。
 mod setup;
@@ -815,6 +816,9 @@ fn main() -> Result<()> {
             commands::window_minimize,
             commands::window_toggle_maximize,
             commands::window_close,
+            commands::get_launcher_preferences,
+            commands::set_launcher_close_behavior,
+            commands::window_choose_close_behavior,
             commands::window_exit_application,
             commands::window_start_dragging,
             commands::window_is_maximized
@@ -833,6 +837,9 @@ fn main() -> Result<()> {
         ))
         // setup 回调：时间炸弹校验、主窗口创建与系统托盘装配。
         .setup(move |app| {
+            app.manage(preferences::PreferenceStore::load(
+                app.path().app_config_dir()?.join("preferences.json"),
+            ));
             app.state::<webview_security::WebviewPolicy>().install_capabilities(app.handle())?;
             // 时间炸弹校验：已过期则弹窗提示并以退出码 0 结束，阻止继续启动。
             match time_bomb_expiration_message() {
@@ -1357,45 +1364,30 @@ fn main() -> Result<()> {
                         return;
                     }
 
-                    // Windows：不弹原生对话框，而是让主窗口打开自带的
-                    // "退出/最小化到托盘"选择菜单；JS 注入缺失时降级为托盘化。
-                    #[cfg(windows)]
-                    {
-                        if label == "main" && !allow_exit.load(Ordering::SeqCst) {
-                            api.prevent_close();
-                            if let Some(main_window) = app_handle.get_webview_window("main") {
-                                if let Err(err) = main_window.eval(
-                                    "if (typeof window.__ALAS_OPEN_CLOSE_PROMPT !== 'function') { throw new Error('close prompt is unavailable'); } window.__ALAS_OPEN_CLOSE_PROMPT();",
-                                ) {
-                                    warn!("Unable to open close chooser: {err:?}");
+                    // 自绘关闭、系统关闭和 Alt+F4 都经过同一份原生偏好。
+                    if label == "main" && !allow_exit.load(Ordering::SeqCst) {
+                        api.prevent_close();
+                        use preferences::CloseBehavior;
+                        match app_handle.state::<preferences::PreferenceStore>()
+                            .close_behavior(preferences::BACKGROUND_SUPPORTED)
+                        {
+                            CloseBehavior::Exit => {
+                                allow_exit.store(true, Ordering::SeqCst);
+                                app_handle.exit(0);
+                            }
+                            CloseBehavior::Tray => minimize_main_window_to_tray(&app_handle),
+                            CloseBehavior::Ask => {
+                                if let Some(main_window) = app_handle.get_webview_window("main") {
+                                    if let Err(err) = main_window.eval(
+                                        "if (typeof window.__ALAS_OPEN_CLOSE_PROMPT !== 'function') { throw new Error('close prompt is unavailable'); } window.__ALAS_OPEN_CLOSE_PROMPT();",
+                                    ) {
+                                        warn!("Unable to open close chooser: {err:?}");
+                                        minimize_main_window_to_tray(&app_handle);
+                                    }
+                                } else {
                                     minimize_main_window_to_tray(&app_handle);
                                 }
-                            } else {
-                                minimize_main_window_to_tray(&app_handle);
                             }
-                            return;
-                        }
-                    }
-
-                    // macOS：隐藏窗口并切到 Accessory 策略，避免没有可见常规
-                    // 窗口时应用被判定为应退出。
-                    #[cfg(target_os = "macos")]
-                    {
-                        if label == "main" && !allow_exit.load(Ordering::SeqCst) {
-                            api.prevent_close();
-                            minimize_main_window_to_tray(&app_handle);
-                            return;
-                        }
-                    }
-
-                    // Linux 没有托盘；关闭主窗口应退出，避免隐藏后无法恢复。
-                    #[cfg(target_os = "linux")]
-                    {
-                        if label == "main" && !allow_exit.load(Ordering::SeqCst) {
-                            api.prevent_close();
-                            allow_exit.store(true, Ordering::SeqCst);
-                            app_handle.exit(0);
-                            return;
                         }
                     }
                 }
@@ -1455,7 +1447,7 @@ fn truncate_log_file(log_dir: &Path, filename: &str) -> Result<()> {
 ///
 /// 注入内容（一个幂等的 IIFE）：阻止浏览器历史后退；把 window.saveAs
 /// 覆盖为"经 FileReader 转 base64 后调用 Tauri save_as 命令"的版本；并
-/// 拼入自定义标题栏脚本（macOS 除外，见 main_window_titlebar_injection_script）。
+/// 拼入标题栏辅助脚本；macOS 仅注入关闭询问，保留系统窗口按钮。
 fn page_load_injector(webview: WebviewWindow, payload: PageLoadPayload<'_>) {
     // 只在加载完成（Finished）时注入：开始加载阶段文档尚未就绪，注入无效。
     if payload.event() == PageLoadEvent::Finished {

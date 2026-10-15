@@ -14,6 +14,7 @@
                 style.id = 'alas-launcher-titlebar-style';
                 style.textContent = ':root{--alas-titlebar-height:56px}#alas-launcher-titlebar{position:fixed;top:0;left:0;right:0;height:var(--topbar-height,var(--alas-titlebar-height,56px));z-index:2147483647;user-select:none;pointer-events:none;background:transparent}#alas-launcher-titlebar *{box-sizing:border-box}.alas-titlebar-drag-zone{position:absolute;inset:0 148px 0 0;height:100%;pointer-events:none;background:transparent;touch-action:none}.header-icon,.header-icon *{app-region:no-drag;-webkit-app-region:no-drag}.header-icon{display:flex;align-items:center;gap:3px;padding:3px 6px;position:absolute;top:50%;transform:translateY(-50%);right:10px;height:36px;pointer-events:auto;border:1px solid rgba(255,255,255,.92);border-radius:18px;background:rgba(250,250,247,.78);box-shadow:0 4px 14px rgba(61,79,97,.1),inset 0 1px 0 rgba(255,255,255,.36);backdrop-filter:blur(16px) saturate(1.2);-webkit-backdrop-filter:blur(16px) saturate(1.2);transition:background .2s ease,border-color .2s ease,box-shadow .2s ease}.icon{width:28px;height:28px;min-width:28px;min-height:28px;margin:0;padding:0;line-height:1;border-radius:12px;border:none;background:transparent;color:#727b86;cursor:pointer;flex:0 0 auto;position:relative;transition:transform 140ms cubic-bezier(.23,1,.32,1),background-color 140ms ease,color 140ms ease;display:inline-flex;align-items:center;justify-content:center}.icon:hover{color:#202832;background:rgba(255,255,255,.72)}.icon:active{transform:scale(.96)}.icon-close{color:#e64f58}.icon-close:hover{color:#b5202e;background:rgba(244,91,91,.15)}.icon svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:1.2;stroke-linecap:round;stroke-linejoin:round;opacity:1;display:block;margin:auto}';
                 style.textContent += '#alas-close-menu{position:fixed;top:8px;right:10px;z-index:2147483647;width:272px;padding:14px;border:1px solid rgba(255,255,255,.9);border-radius:20px;background:rgba(250,250,247,.94);box-shadow:0 18px 46px rgba(46,58,72,.2),inset 0 1px 0 rgba(255,255,255,.7);backdrop-filter:blur(20px) saturate(1.18);-webkit-backdrop-filter:blur(20px) saturate(1.18);color:#202832;opacity:0;pointer-events:none;transform:translateY(-6px) scale(.96);transform-origin:calc(100% - 64px) 0;transition:opacity 140ms ease,transform 180ms cubic-bezier(.23,1,.32,1),background .2s ease,border-color .2s ease;app-region:no-drag;-webkit-app-region:no-drag}#alas-close-menu.is-open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1)}#alas-close-menu *{box-sizing:border-box;app-region:no-drag;-webkit-app-region:no-drag}#alas-close-menu-title{margin:0 0 12px;font:500 13px/1.55 "MiSans",sans-serif;color:rgba(32,40,50,.82)}#alas-close-menu-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}#alas-close-menu button{display:flex;align-items:center;justify-content:center;min-width:0;min-height:36px;margin:0;padding:0 12px;border:1px solid rgba(92,105,120,.16);border-radius:11px;background:rgba(105,118,133,.08);color:#394451;font:600 12px/1 "MiSans",sans-serif;cursor:pointer;transition:background-color 140ms ease,color 140ms ease,transform 140ms cubic-bezier(.23,1,.32,1)}#alas-close-menu button:hover{background:rgba(105,118,133,.14)}#alas-close-menu button:active{transform:scale(.98)}#alas-close-menu button:disabled{opacity:.55;cursor:default;transform:none}#alas-close-menu .alas-close-confirm{border-color:rgba(205,62,69,.28);background:#d94b4b;color:#fff}#alas-close-menu .alas-close-confirm:hover{background:#c93e3e;color:#fff}';
+                style.textContent += '#alas-close-menu[hidden],#alas-close-menu [hidden],#alas-launcher-titlebar [hidden]{display:none}#alas-close-menu-hint{margin:0 0 12px;font:400 12px/1.55 \"MiSans\",sans-serif;opacity:.75}#alas-close-menu-error{margin:0 0 12px;font:500 12px/1.55 \"MiSans\",sans-serif;color:#df4653;overflow-wrap:anywhere}#alas-close-menu button:focus-visible{outline:2px solid #4589e8;outline-offset:2px}';
                 style.textContent += ':root[data-theme*="dark"] .header-icon,:root[data-color-mode="dark"] .header-icon,:root.dark .header-icon,body[data-theme*="dark"] .header-icon,body[data-color-mode="dark"] .header-icon,body.dark .header-icon,[data-theme*="dark"] .header-icon,[data-color-mode="dark"] .header-icon,#alas-launcher-titlebar.is-dark .header-icon{background:rgba(30,34,42,.78);border:1px solid rgba(255,255,255,.14);box-shadow:0 4px 16px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.14)}';
                 style.textContent += ':root[data-theme*="dark"] .icon,:root[data-color-mode="dark"] .icon,:root.dark .icon,body[data-theme*="dark"] .icon,body[data-color-mode="dark"] .icon,body.dark .icon,[data-theme*="dark"] .icon,[data-color-mode="dark"] .icon,#alas-launcher-titlebar.is-dark .icon{color:rgba(220,228,238,.82)}';
                 style.textContent += ':root[data-theme*="dark"] .icon:hover,:root[data-color-mode="dark"] .icon:hover,:root.dark .icon:hover,body[data-theme*="dark"] .icon:hover,body[data-color-mode="dark"] .icon:hover,body.dark .icon:hover,[data-theme*="dark"] .icon:hover,[data-color-mode="dark"] .icon:hover,#alas-launcher-titlebar.is-dark .icon:hover{color:#fff;background:rgba(255,255,255,.14)}';
@@ -33,18 +34,25 @@
             const titlebar = document.createElement('div');
             titlebar.id = 'alas-launcher-titlebar';
             titlebar.innerHTML = '<div class="alas-titlebar-drag-zone" aria-hidden="true"></div><div class="header-icon"><button type="button" class="icon icon-hide" data-action="hide" aria-label="'+i18n.hideLabel+'" title="'+i18n.hideLabel+'"><svg viewBox="0 0 6 6"><rect x="1" y="1" width="4" height="4" rx="1"/><path d="M2 3h2"/></svg></button><button type="button" class="icon icon-minimize" data-action="minimize" aria-label="'+i18n.minimizeLabel+'" title="'+i18n.minimizeTitle+'"><svg viewBox="0 0 6 6"><line x1="1" y1="3" x2="5" y2="3"/></svg></button><button type="button" class="icon icon-maximize" data-action="maximize" aria-label="'+i18n.maximizeLabel+'" title="'+i18n.maximizeTitle+'"><svg viewBox="0 0 6 6" class="svg-restore" style="display:none"><polyline points="1,3 1,1 3,1"/><polyline points="3,5 5,5 5,3"/></svg><svg viewBox="0 0 6 6" class="svg-maximize"><polyline points="1,2.5 1,1 2.5,1"/><polyline points="3.5,5 5,5 5,3.5"/></svg></button><button type="button" class="icon icon-close" data-action="close" aria-label="'+i18n.closeLabel+'" title="'+i18n.closeTitle+'"><svg viewBox="0 0 6 6"><line x1="1" y1="1" x2="5" y2="5"/><line x1="5" y1="1" x2="1" y2="5"/></svg></button></div>';
-            document.body.dataset.alasCustomTitlebar = 'true';
-            document.body.prepend(titlebar);
+            if (!nativeTitlebar) {
+                document.body.dataset.alasCustomTitlebar = 'true';
+                document.body.prepend(titlebar);
+            }
+            if (!closePromptEnabled) titlebar.querySelector('[data-action="hide"]').hidden = true;
             const maximizeButton = titlebar.querySelector('[data-action="maximize"]');
             let closeMenu = document.getElementById('alas-close-menu');
             if (!closeMenu) {
                 closeMenu = document.createElement('div');
                 closeMenu.id = 'alas-close-menu';
                 closeMenu.setAttribute('role', 'dialog');
-                closeMenu.setAttribute('aria-modal', 'false');
-                closeMenu.innerHTML = '<p id="alas-close-menu-title"></p><div id="alas-close-menu-actions"><button type="button" data-close-action="minimize"></button><button type="button" class="alas-close-confirm" data-close-action="exit"></button></div>';
+                closeMenu.setAttribute('aria-modal', 'true');
+                closeMenu.setAttribute('aria-labelledby', 'alas-close-menu-title');
+                closeMenu.setAttribute('aria-describedby', 'alas-close-menu-hint');
+                closeMenu.hidden = true;
+                closeMenu.innerHTML = '<p id="alas-close-menu-title"></p><p id="alas-close-menu-hint"></p><p id="alas-close-menu-error" role="alert" hidden></p><div id="alas-close-menu-actions"><button type="button" data-close-action="tray"></button><button type="button" class="alas-close-confirm" data-close-action="exit"></button></div>';
                 closeMenu.querySelector('#alas-close-menu-title').textContent = i18n.closePrompt;
-                closeMenu.querySelector('[data-close-action="minimize"]').textContent = i18n.minimizeToTrayAction;
+                closeMenu.querySelector('#alas-close-menu-hint').textContent = i18n.closeRememberHint;
+                closeMenu.querySelector('[data-close-action="tray"]').textContent = i18n.minimizeToTrayAction;
                 closeMenu.querySelector('[data-close-action="exit"]').textContent = i18n.exitAction;
                 closeMenu.addEventListener('pointerdown', event => event.stopPropagation());
                 document.body.appendChild(closeMenu);
@@ -110,45 +118,74 @@
                     console.error('Failed to sync titlebar theme', e);
                 }
             };
-            const setCloseMenuOpen = open => {
+            let closeChoicePending = false;
+            let closePromptPreviousFocus = null;
+            const closeButtons = Array.from(closeMenu.querySelectorAll('button'));
+            const closeError = closeMenu.querySelector('#alas-close-menu-error');
+            const setCloseMenuOpen = (open, restoreFocus = true) => {
                 if (open) {
+                    if (closeMenu.classList.contains('is-open')) return;
+                    closePromptPreviousFocus = document.activeElement;
+                    closeError.hidden = true;
+                    closeError.textContent = '';
+                    closeMenu.hidden = false;
                     syncTheme();
                     syncTitlebarLayout();
                     try {
                         const iconRect = titlebar.querySelector('.header-icon').getBoundingClientRect();
-                        closeMenu.style.top = Math.round(iconRect.bottom + 8) + 'px';
-                        closeMenu.style.right = Math.max(10, Math.round(window.innerWidth - iconRect.right)) + 'px';
+                        closeMenu.style.top = nativeTitlebar ? '12px' : Math.round(iconRect.bottom + 8) + 'px';
+                        closeMenu.style.right = nativeTitlebar ? '12px' : Math.max(10, Math.round(window.innerWidth - iconRect.right)) + 'px';
                     } catch (_) {}
                 }
                 closeMenu.classList.toggle('is-open', open);
-                if (open) closeMenu.querySelector('[data-close-action="minimize"]').focus({ preventScroll: true });
-            };
-            const showClosePrompt = () => {
-                if (!closePromptEnabled) {
-                    invoke('window_close').catch(error => console.error('Failed to close window', error));
-                    return;
+                closeMenu.hidden = !open;
+                if (open) closeButtons[0].focus({ preventScroll: true });
+                else if (restoreFocus && closePromptPreviousFocus && closePromptPreviousFocus.isConnected) {
+                    closePromptPreviousFocus.focus({ preventScroll: true });
                 }
-                setCloseMenuOpen(true);
             };
-            window.__ALAS_OPEN_CLOSE_PROMPT = showClosePrompt;
-            closeMenu.querySelector('[data-close-action="minimize"]').addEventListener('click', async () => {
-                setCloseMenuOpen(false);
-                try { await invoke('window_hide'); }
-                catch (error) { console.error('Failed to minimize window to tray', error); }
-            });
-            closeMenu.querySelector('[data-close-action="exit"]').addEventListener('click', async () => {
-                closeMenu.querySelectorAll('button').forEach(button => { button.disabled = true; });
-                try { await invoke('window_exit_application'); }
-                catch (error) {
-                    closeMenu.querySelectorAll('button').forEach(button => { button.disabled = false; });
-                    console.error('Failed to exit application', error);
+            // 原生 CloseRequested 统一决定关闭行为；此钩子只展示菜单，避免递归关闭。
+            window.__ALAS_OPEN_CLOSE_PROMPT = () => {
+                if (closePromptEnabled && !closeChoicePending) setCloseMenuOpen(true);
+            };
+            closeButtons.forEach(button => button.addEventListener('click', async () => {
+                if (closeChoicePending) return;
+                closeChoicePending = true;
+                closeButtons.forEach(item => { item.disabled = true; });
+                closeMenu.setAttribute('aria-busy', 'true');
+                closeError.hidden = true;
+                try {
+                    await invoke('window_choose_close_behavior', { behavior: button.dataset.closeAction });
+                    setCloseMenuOpen(false);
+                } catch (error) {
+                    closeError.textContent = typeof error === 'string' && error ? error : (error && error.message) || i18n.closeSaveFailed;
+                    closeError.hidden = false;
+                    console.error('Failed to save close behavior', error);
+                } finally {
+                    closeChoicePending = false;
+                    closeButtons.forEach(item => { item.disabled = false; });
+                    closeMenu.removeAttribute('aria-busy');
+                    if (closeMenu.classList.contains('is-open')) button.focus({ preventScroll: true });
                 }
-            });
+            }));
             document.addEventListener('pointerdown', event => {
-                if (closeMenu.classList.contains('is-open') && !closeMenu.contains(event.target)) setCloseMenuOpen(false);
+                if (!closeChoicePending && closeMenu.classList.contains('is-open') && !closeMenu.contains(event.target)) {
+                    setCloseMenuOpen(false, false);
+                }
             });
             document.addEventListener('keydown', event => {
-                if (event.key === 'Escape' && closeMenu.classList.contains('is-open')) setCloseMenuOpen(false);
+                if (!closeMenu.classList.contains('is-open')) return;
+                if (event.key === 'Escape') {
+                    event.preventDefault();
+                    if (!closeChoicePending) setCloseMenuOpen(false);
+                } else if (event.key === 'Tab') {
+                    event.preventDefault();
+                    if (closeChoicePending) return;
+                    const currentIndex = closeButtons.indexOf(document.activeElement);
+                    const nextIndex = currentIndex < 0 ? (event.shiftKey ? closeButtons.length - 1 : 0)
+                        : (currentIndex + (event.shiftKey ? -1 : 1) + closeButtons.length) % closeButtons.length;
+                    closeButtons[nextIndex].focus({ preventScroll: true });
+                }
             });
             const interactiveSelector = 'a[href],button,input,select,textarea,summary,label[for],[role="button"],[role="link"],[contenteditable="true"],[tabindex]:not([tabindex="-1"]),[onclick]';
             const isInteractiveElement = element => {
@@ -161,6 +198,7 @@
             };
 
             document.addEventListener('pointerdown', event => {
+                if (nativeTitlebar) return;
                 syncTheme();
                 syncTitlebarLayout();
                 if (!event.isPrimary || event.button !== 0) return;
@@ -180,6 +218,7 @@
             }, { capture: true });
 
             document.addEventListener('dblclick', async event => {
+                if (nativeTitlebar) return;
                 syncTheme();
                 syncTitlebarLayout();
                 const tbRect = titlebar.getBoundingClientRect();
@@ -200,7 +239,7 @@
             }, { capture: true });
 
             const syncMaximizeState = async () => {
-                if (!maximizeButton) return;
+                if (nativeTitlebar || !maximizeButton) return;
                 try {
                     const maximized = await invoke('window_is_maximized');
                     maximizeButton.dataset.maximized = maximized ? 'true' : 'false';
@@ -221,7 +260,7 @@
                             case 'hide': await invoke('window_hide'); break;
                             case 'minimize': await invoke('window_minimize'); break;
                             case 'maximize': await invoke('window_toggle_maximize'); await syncMaximizeState(); break;
-                            case 'close': showClosePrompt(); break;
+                            case 'close': await invoke('window_close'); break;
                         }
                     } catch (error) {
                         console.error('Failed to handle ' + button.dataset.action + ' window action', error);

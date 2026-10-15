@@ -100,7 +100,7 @@ fn test_titlebars_use_webview_draggable_regions_for_touch_dragging() {
         assert!(!titlebar_script.contains("alas-close-optics"));
         assert!(!titlebar_script.contains("alas-island-open"));
         assert!(titlebar_script.contains("__ALAS_OPEN_CLOSE_PROMPT"));
-        assert!(titlebar_script.contains("window_exit_application"));
+        assert!(titlebar_script.contains("window_choose_close_behavior"));
         assert!(!titlebar_script.contains("addEventListener('scroll'"));
         assert!(!titlebar_script.contains("MutationObserver"));
         assert!(titlebar_script.contains("data-theme*="));
@@ -125,4 +125,13 @@ fn test_windows_enable_webview_draggable_regions() {
         assert!(!args.contains("msSmartScreenProtection"));
         assert!(args.contains("--no-proxy-server"));
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_keeps_native_window_controls_with_a_close_chooser() {
+    let script = main_window_titlebar_injection_script();
+    assert!(script.contains("const nativeTitlebar = true;"));
+    assert!(script.contains("__ALAS_OPEN_CLOSE_PROMPT"));
+    assert!(script.contains("window_choose_close_behavior"));
 }

@@ -30,15 +30,18 @@
 | `window_minimize` | ✓ | ✓ | ✓ |
 | `window_toggle_maximize` | — | ✓ | ✓ |
 | `window_close` | ✓ | ✓ | ✓ |
+| `get_launcher_preferences` | — | — | ✓ |
+| `set_launcher_close_behavior` | — | — | ✓ |
+| `window_choose_close_behavior` | — | ✓ | ✓ |
 | `window_exit_application` | — | ✓ | ✓ |
 | `window_start_dragging` | ✓ | ✓ | ✓ |
 | `window_is_maximized` | — | ✓ | ✓ |
 
-远端 backend 不在命令矩阵内。导出文件、导出日志、退出应用还要求 caller 可见且未最小化；保存对话框的父窗口是这个 caller。
+远端 backend 不在命令矩阵内。导出文件、导出日志、关闭偏好读写、退出应用还要求 caller 可见且未最小化；保存对话框的父窗口是这个 caller。关闭偏好保存到应用配置目录的 `preferences.json`，原子写入成功后才执行退出或托盘化；错误页仅可完成关闭选择，不能读取或直接修改设置。
 
 ## 三层 IPC 验证
 
-1. `build.rs` 使用 `tauri_build::AppManifest::new().commands(COMMANDS)` 声明上表全部 12 个应用命令。Tauri 为其生成 `allow-save-as` 等权限。少了 AppManifest，锁定版本默认不会对自定义应用命令执行 capability 拦截。
+1. `build.rs` 使用 `tauri_build::AppManifest::new().commands(COMMANDS)` 声明上表全部 15 个应用命令。Tauri 为其生成 `allow-save-as` 等权限。少了 AppManifest，锁定版本默认不会对自定义应用命令执行 capability 拦截。
 2. `install_capabilities()` 在 setup 最开始安装按窗口限制的运行时 capability。splash/error 只使用 `local: true`；回环 backend 单独使用 `local: false` 和精确 origin 的 remote URLPattern。没有 `core:default`、通知或 dialog 的 JavaScript 权限；Rust 内部 dialog 调用不需要这些权限。新增命令必须同步 AppManifest、Rust 来源矩阵和审核测试。
 3. 每个命令的 `Caller` 从实际 `CommandItem` 获取 WebView，检查 window/webview label 一致、当前顶层 URL、命令角色及私有凭证。缺失状态、URL 读取失败和不合法参数通过 `Result` 拒绝，不依赖 panic。
 

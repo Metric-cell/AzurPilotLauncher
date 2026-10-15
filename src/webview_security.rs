@@ -24,6 +24,9 @@ pub const BACKEND_ERROR_URL_BASE: &str = "alas-error://localhost/backend";
 /// 也用于 build.rs 的 AppManifest；新增命令必须显式更新来源矩阵。
 #[cfg(test)]
 pub const APP_COMMANDS: &[&str] = &[
+    "get_launcher_preferences",
+    "set_launcher_close_behavior",
+    "window_choose_close_behavior",
     "save_as",
     "splash_ready",
     "download_today_gui_log",
@@ -46,6 +49,7 @@ const SPLASH_COMMANDS: &[&str] = &[
     "window_start_dragging",
 ];
 const ERROR_COMMANDS: &[&str] = &[
+    "window_choose_close_behavior",
     "download_today_gui_log",
     "download_today_launcher_log",
     "retry_backend_connection",
@@ -58,6 +62,9 @@ const ERROR_COMMANDS: &[&str] = &[
     "window_is_maximized",
 ];
 const BACKEND_COMMANDS: &[&str] = &[
+    "get_launcher_preferences",
+    "set_launcher_close_behavior",
+    "window_choose_close_behavior",
     "save_as",
     "window_hide",
     "window_minimize",
@@ -653,6 +660,59 @@ mod tests {
                 &policy.backend_token
             )
             .is_err());
+    }
+
+    #[test]
+    fn close_preferences_are_only_available_to_the_trusted_main_frame() {
+        let policy = policy();
+        for command in [
+            "get_launcher_preferences",
+            "set_launcher_close_behavior",
+            "window_choose_close_behavior",
+        ] {
+            assert!(policy
+                .authorize(
+                    command,
+                    "main",
+                    "main",
+                    &policy.backend,
+                    &policy.backend_token
+                )
+                .is_ok());
+            assert!(policy
+                .authorize(
+                    command,
+                    "splash",
+                    "splash",
+                    &policy.splash,
+                    &policy.splash_token
+                )
+                .is_err());
+            assert!(policy
+                .authorize(
+                    command,
+                    "main",
+                    "child",
+                    &policy.backend,
+                    &policy.backend_token
+                )
+                .is_err());
+            assert!(policy
+                .authorize(
+                    command,
+                    "main",
+                    "main",
+                    &policy.backend,
+                    &policy.error_token
+                )
+                .is_err());
+            assert_eq!(
+                policy
+                    .authorize(command, "main", "main", &policy.error, &policy.error_token)
+                    .is_ok(),
+                command == "window_choose_close_behavior",
+            );
+        }
     }
 
     #[test]

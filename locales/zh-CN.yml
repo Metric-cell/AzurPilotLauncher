@@ -110,6 +110,8 @@ dialog:
   nodejs_install_failed: "Node.js 安装失败"
   nodejs_install_failed_detail: "无法自动安装 Node.js。请重试或手动安装。\n\n%{error}"
   confirm_exit: "确认要离开吗？您可以选择退出，或者让它在后台默默运行"
+  close_remember_hint: "将记住此选择，可在系统设置中更改。"
+  close_save_failed: "无法保存关闭选项，请重试。"
   exit: "退出"
   minimize_to_tray: "最小化到托盘"
   starting: "正在启动"
@@ -169,6 +171,8 @@ autostart:
   set_failed: "设置开机自启动失败：%{error}"
 
 errors:
+  save_launcher_preferences: "无法保存启动器设置：%{error}"
+  close_behavior_unsupported: "当前系统不支持后台运行。"
   backend_port_in_use: "后端端口 %{port} 已被其他程序占用，请关闭该程序或修改端口。"
   backend_invalid_host: "WebUI 主机名无效，请填写单个主机名或 IP 地址。"
   nodejs_user_data_dir_not_found: "无法定位当前用户的本地数据目录。"
