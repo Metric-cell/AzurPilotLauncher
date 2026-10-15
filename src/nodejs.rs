@@ -1,7 +1,7 @@
 //! Windows Node.js 探测与用户级便携安装。
 //!
 //! 缺失与过旧共用一个安装流程：只下载固定摘要的官方 HTTPS zip，先在
-//! LocalAppData 同盘随机目录内解压并验证，再原子发布。不会运行 MSI、写
+//! 安装根的 .launcher/nodejs 随机目录内解压并验证，再原子发布。不会运行 MSI、写
 //! HKLM/系统 PATH、使用 ProgramData 或改变目录 ACL。
 
 #[cfg(any(windows, test))]
@@ -45,8 +45,6 @@ use source::{
 #[cfg(windows)]
 pub const NODEJS_MIN_FRONTEND_VERSION_TEXT: &str = source::MIN_FRONTEND_VERSION_TEXT;
 #[cfg(windows)]
-const NODEJS_USER_DIRECTORY: &str = "AzurPilotLauncher";
-#[cfg(windows)]
 const NODEJS_DOWNLOAD_BUFFER_BYTES: usize = 64 * 1024;
 #[cfg(windows)]
 const NODEJS_REGISTRY_PATH: &str = r"SOFTWARE\Node.js";
@@ -71,10 +69,7 @@ pub enum NodeJsAvailability {
 
 #[cfg(windows)]
 fn private_nodejs_root() -> Result<PathBuf> {
-    let base = dirs::data_local_dir()
-        .filter(|path| path.is_absolute())
-        .ok_or_else(|| anyhow::anyhow!(t!("errors.nodejs_user_data_dir_not_found")))?;
-    Ok(base.join(NODEJS_USER_DIRECTORY).join("nodejs"))
+    Ok(crate::runtime_paths::state_dir().join("nodejs"))
 }
 
 #[cfg(windows)]

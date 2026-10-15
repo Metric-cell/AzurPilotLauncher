@@ -37,6 +37,8 @@ mod notify;
 mod popup_guard;
 mod preferences;
 mod process_security;
+#[cfg(windows)]
+mod runtime_paths;
 /// 首次启动环境准备（deploy.yaml、仓库克隆/更新、依赖同步）。
 mod setup;
 mod splash_state;
@@ -699,6 +701,8 @@ fn main() -> Result<()> {
     }
     // 初始化运行环境（切换工作目录等，详见 setup 模块）。
     setup_environment()?;
+    #[cfg(windows)]
+    runtime_paths::initialize()?;
     // 日志守卫必须存活到进程结束，退出时负责刷盘。
     let _log_guard = initialize_logging()?;
     crate::i18n::init();
@@ -793,6 +797,18 @@ fn main() -> Result<()> {
     .map_err(anyhow::Error::msg)?;
 
     info!("Starting Webview...");
+    let context = tauri::generate_context!();
+    #[cfg(windows)]
+    let context = {
+        let mut context = context;
+        // 锁定版本的窗口配置不支持 dataDirectory，改为在 setup 中显式创建 splash。
+        for window in &mut context.config_mut().app.windows {
+            if window.label == "splash" {
+                window.create = false;
+            }
+        }
+        context
+    };
     // 注册 alas-error:// 自定义协议：服务后端连接失败的错误页面。
     tauri::Builder::default()
         .register_uri_scheme_protocol("alas-error", |_ctx, request| {
@@ -838,10 +854,23 @@ fn main() -> Result<()> {
         ))
         // setup 回调：时间炸弹校验、主窗口创建与系统托盘装配。
         .setup(move |app| {
+            #[cfg(windows)]
+            let preference_path = runtime_paths::state_dir().join("preferences.json");
+            #[cfg(not(windows))]
+            let preference_path = app.path().app_config_dir()?.join("preferences.json");
             app.manage(preferences::PreferenceStore::load(
-                app.path().app_config_dir()?.join("preferences.json"),
+                preference_path,
             ));
             app.state::<webview_security::WebviewPolicy>().install_capabilities(app.handle())?;
+            #[cfg(windows)]
+            {
+                let splash_config = app.config().app.windows.iter()
+                    .find(|window| window.label == "splash")
+                    .ok_or_else(|| anyhow!("Splash window configuration is missing"))?;
+                tauri::WebviewWindowBuilder::from_config(app, splash_config)?
+                    .data_directory(runtime_paths::state_dir().join("webview2"))
+                    .build()?;
+            }
             // 时间炸弹校验：已过期则弹窗提示并以退出码 0 结束，阻止继续启动。
             match time_bomb_expiration_message() {
                 Ok(Some(message)) => {
@@ -967,7 +996,7 @@ fn main() -> Result<()> {
             Ok(())
         })
         // 运行事件循环；Ready 事件触发后在后台线程执行完整启动流程。
-        .build(tauri::generate_context!())?
+        .build(context)?
         .run(move |app_handle, event| {
             match event {
                 tauri::RunEvent::Ready => {
@@ -1748,7 +1777,10 @@ fn create_main_window(app: &tauri::AppHandle, port: u16) -> Result<WebviewWindow
         .ok_or_else(|| anyhow!(t!("errors.main_window_missing")))?;
 
     let app_for_navigation = app.clone();
-    let main_window = tauri::WebviewWindowBuilder::from_config(app, main_config)?
+    let builder = tauri::WebviewWindowBuilder::from_config(app, main_config)?;
+    #[cfg(windows)]
+    let builder = builder.data_directory(runtime_paths::state_dir().join("webview2"));
+    let main_window = builder
         .on_navigation(move |url| handle_backend_navigation(app_for_navigation.clone(), port, url))
         .on_page_load(page_load_injector)
         .build()?;

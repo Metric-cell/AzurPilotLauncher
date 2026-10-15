@@ -379,9 +379,7 @@ fn ensure_windows_app_user_model_id(id: &str, name: &str) -> Result<PathBuf> {
 /// 本地数据目录不存在且无法创建，或图标读写失败时返回错误。
 #[cfg(windows)]
 fn ensure_windows_notification_icon() -> Result<PathBuf> {
-    let data_dir = dirs::data_local_dir()
-        .ok_or_else(|| anyhow!(t!("errors.appdata_not_found")))?
-        .join("AzurPilotLauncher");
+    let data_dir = crate::runtime_paths::state_dir();
     fs::create_dir_all(&data_dir)?;
 
     // 已存在的图标内容与嵌入版本一致时跳过写入，减少磁盘 IO。

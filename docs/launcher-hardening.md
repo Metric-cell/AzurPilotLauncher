@@ -14,7 +14,7 @@
 
 Windows 清单为 `asInvoker`；启动器不主动请求管理员权限。安装器为 `PrivilegesRequired=lowest`，默认安装到当前用户的 LocalAppData，保留已有配置及运行数据，使用系统 Restart Manager 处理本安装注册文件的占用。已去掉全局 Python/Git 进程强杀、递归 ACL 重置、Everyone 完全控制、在线 ActiveX 协议页和静默系统 VC++ 安装。
 
-Node.js 缺失或版本不足时，经用户同意下载固定官方便携包，使用源码固定 SHA256 校验，放入当前用户数据目录；不运行 MSI、不改系统 PATH。旧管理员安装不会被新安装器自动改权限或迁移，请使用新的用户安装目录。
+Node.js 缺失或版本不足时，经用户同意下载固定官方便携包，使用源码固定 SHA256 校验，放入安装根的 `.launcher/nodejs`；不运行 MSI、不改系统 PATH。旧管理员安装不会被新安装器自动改权限或迁移，请使用当前用户可写的安装目录。集中部署布局见 [windows-portable.md](windows-portable.md)。
 
 `asInvoker` 会继承调用者令牌；手动以管理员启动仍会继承该权限。此处没有声称可以防御已经控制当前账号或已能修改应用文件的攻击者。
 

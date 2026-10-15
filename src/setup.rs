@@ -69,6 +69,7 @@ const BOOTSTRAP_UV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bootstrap_
 ///
 /// 优先按"便携式同目录发行"查找：启动器可执行文件所在目录若存在
 /// `deploy/installer.py` 即认为是仓库根（Windows/Linux 的常规布局）。
+/// 也支持安装根的 `backend/deploy/installer.py`，将后端与启动器状态分离。
 /// macOS 额外支持 `.app` 包布局：从 `AzurPilot.app/Contents/MacOS`
 /// 回退到 `AzurPilot.app/Contents/AzurLaneAutoScript`。
 ///
@@ -85,6 +86,11 @@ pub fn alas_repo_dir() -> PathBuf {
     installer_py.extend(["deploy", "installer.py"]);
     if fs::exists(installer_py).unwrap() {
         return exe_folder;
+    }
+    // 集中部署时 EXE 留在安装根，后端和虚拟环境放在 backend 子目录。
+    let backend = exe_folder.join("backend");
+    if backend.join("deploy/installer.py").is_file() {
+        return backend;
     }
     // macOS 需额外考虑 .app 包布局：AzurPilot.app/Contents/AzurLaneAutoScript
     #[cfg(target_os = "macos")]

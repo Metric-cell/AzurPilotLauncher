@@ -19,11 +19,11 @@ scripts/wsl-dev.sh preview
 
 部署模板指向 `Metric-cell/AzurPilot` 的 `deploy` 分支；已有用户配置保留。开发检出与 `--skip-update` 跳过自身/仓库发布更新，冻结依赖锁，取消启动不删除已有环境。`--preview-crash` 隐含跳过更新并只演示错误状态。`--start-minimized` 只在有托盘的平台生效。
 
-Windows/macOS 有托盘，首次关闭询问退出或后台运行，保存后按偏好执行；系统设置可改为每次询问、后台运行或退出。偏好保存在应用配置目录的 `preferences.json`，写入失败保留窗口。Linux 没有托盘，因此关闭主窗口退出。Windows/macOS 托盘化仅隐藏窗口并保留 WebView、当前页面和连接，恢复直接显示并聚焦，不重新加载前端；窗口意外丢失时才走防重入重建。保留 WebView 会占用前端内存。安全策略与调用服务由应用状态持有。远端后端使用原生窗口装饰，不获得本地原生命令权限。
+Windows/macOS 有托盘，首次关闭询问退出或后台运行，保存后按偏好执行；系统设置可改为每次询问、后台运行或退出。Windows 偏好保存在 EXE 同目录的 `.launcher/preferences.json`，其他平台保存在应用配置目录，写入失败保留窗口。Linux 没有托盘，因此关闭主窗口退出。Windows/macOS 托盘化仅隐藏窗口并保留 WebView、当前页面和连接，恢复直接显示并聚焦，不重新加载前端；窗口意外丢失时才走防重入重建。保留 WebView 会占用前端内存。安全策略与调用服务由应用状态持有。远端后端使用原生窗口装饰，不获得本地原生命令权限。
 
 ## 权限约定
 
-- Windows 普通用户运行；Node 只安装到当前用户数据目录，命令使用 `CreateNoWindow`。
+- Windows 普通用户运行；Node、WebView2 数据、偏好与缓存放在 EXE 同目录的 `.launcher/`，后端可放在同级 `backend/`，命令使用 `CreateNoWindow`。集中部署与迁移见 [windows-portable.md](docs/windows-portable.md)。
 - 自更新默认禁用；启用方式与签名工具见 [update-security.md](docs/update-security.md)。发行私钥不得嵌入客户端。
 - 自定义原生命令须同时登记 build.rs AppManifest 和 WebView 角色矩阵；不授予网页默认 core/plugin 权限。
 - 「开源项目」通过固定目标的 `open_project_repository` 在系统浏览器打开个人仓库；仅可信可见的后端主框架可调用，网页不能传入任意 URL。

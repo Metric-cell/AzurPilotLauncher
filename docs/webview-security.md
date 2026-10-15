@@ -38,7 +38,7 @@
 | `window_start_dragging` | ✓ | ✓ | ✓ |
 | `window_is_maximized` | — | ✓ | ✓ |
 
-远端 backend 不在命令矩阵内。导出文件、导出日志、关闭偏好读写、退出应用还要求 caller 可见且未最小化；保存对话框的父窗口是这个 caller。关闭偏好保存到应用配置目录的 `preferences.json`，原子写入成功后才执行退出或托盘化；错误页仅可完成关闭选择，不能读取或直接修改设置。
+远端 backend 不在命令矩阵内。导出文件、导出日志、关闭偏好读写、退出应用还要求 caller 可见且未最小化；保存对话框的父窗口是这个 caller。关闭偏好在 Windows 保存到 EXE 同目录的 `.launcher/preferences.json`，其他平台保存到应用配置目录；原子写入成功后才执行退出或托盘化。错误页仅可完成关闭选择，不能读取或直接修改设置。
 
 ## 三层 IPC 验证
 
