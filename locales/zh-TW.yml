@@ -169,6 +169,13 @@ autostart:
   set_failed: "設定開機自動啟動失敗：%{error}"
 
 errors:
+  backend_port_in_use: "後端連接埠 %{port} 已被其他程式占用，請關閉該程式或修改連接埠。"
+  backend_invalid_host: "WebUI 主機名稱無效，請填寫單一主機名稱或 IP 位址。"
+  nodejs_user_data_dir_not_found: "無法定位目前使用者的本機資料目錄。"
+  export_busy: "已有一個匯出或儲存對話方塊正在處理。"
+  export_invalid_filename: "匯出檔案名稱無效，請使用不含路徑的一般檔案名稱。"
+  export_invalid_data: "匯出內容不是有效的 Base64 資料。"
+  export_too_large: "匯出檔案不得超過 32 MiB。"
   backend_startup_cancelled: "後端啟動已取消。"
   backend_tls_failed: "無法驗證後端 HTTPS 憑證，請檢查憑證信任及主機名稱：%{error}"
   workspace_protected: "偵測到本機開發修改，已停止發行更新；請使用 --skip-update 或獨立發行目錄。"

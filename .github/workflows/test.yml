@@ -53,11 +53,23 @@ jobs:
           cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Tests use build.rs placeholders for uv and mTLS; no release secrets needed.
+      # Tests disable self-update unless a public trust root is explicitly configured.
       - name: Check all targets
         run: cargo check --locked --all-targets
 
-      # GitHub-hosted Windows runners run as administrators, as required by
-      # the launcher manifest and protected Node.js installer directory tests.
       - name: Run tests
         run: cargo test --locked --all-targets
+
+      - name: Verify signed release tooling (Linux)
+        if: runner.os == 'Linux'
+        run: python3 scripts/test-sign-launcher-update.py
+
+      - name: Setup Node.js for bridge tests (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Verify native bridge restrictions (Linux)
+        if: runner.os == 'Linux'
+        run: node scripts/test-webview-bridge.cjs

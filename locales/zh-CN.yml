@@ -169,6 +169,13 @@ autostart:
   set_failed: "设置开机自启动失败：%{error}"
 
 errors:
+  backend_port_in_use: "后端端口 %{port} 已被其他程序占用，请关闭该程序或修改端口。"
+  backend_invalid_host: "WebUI 主机名无效，请填写单个主机名或 IP 地址。"
+  nodejs_user_data_dir_not_found: "无法定位当前用户的本地数据目录。"
+  export_busy: "已有一个导出或保存对话框正在处理。"
+  export_invalid_filename: "导出文件名无效，请使用不含路径的普通文件名。"
+  export_invalid_data: "导出内容不是有效的 Base64 数据。"
+  export_too_large: "导出文件不能超过 32 MiB。"
   backend_startup_cancelled: "后端启动已取消。"
   backend_tls_failed: "无法验证后端 HTTPS 证书，请检查证书信任及主机名：%{error}"
   workspace_protected: "检测到本地开发修改，已停止发布更新；请使用 --skip-update 或独立发布目录。"

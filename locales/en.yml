@@ -169,6 +169,13 @@ autostart:
   set_failed: "Failed to set autostart: %{error}"
 
 errors:
+  backend_port_in_use: "Backend port %{port} is used by another program. Close it or change the port."
+  backend_invalid_host: "Invalid WebUI host. Enter a single hostname or IP address."
+  nodejs_user_data_dir_not_found: "Cannot locate the current user’s local data directory."
+  export_busy: "Another export or save dialog is still pending."
+  export_invalid_filename: "Invalid export filename. Use a plain filename without a path."
+  export_invalid_data: "Export content is not valid Base64 data."
+  export_too_large: "Export files must not exceed 32 MiB."
   backend_startup_cancelled: "Backend startup was cancelled."
   backend_tls_failed: "Cannot verify the backend HTTPS certificate. Check certificate trust and hostname: %{error}"
   workspace_protected: "Local development changes detected; release update stopped. Use --skip-update or a separate deployment directory."

@@ -142,7 +142,7 @@ Deploy:
     # ! You need to set Password below to enable remote access since everyone can access to your ap if they have your url.
     # 详情请参阅 https://app.azurlane.cloud/
     # See here (http://app.azurlane.cloud/en.html) for more infomation.
-    EnableRemoteAccess: true
+    EnableRemoteAccess: false
     # SSH 服务器登录用户名
     # Username when login into ssh server
     # [默认] null（启动时会随机生成一个）
@@ -168,9 +168,9 @@ Deploy:
     # --host. Host to listen
     # [使用 IPv6] '::'
     # [Use IPv6] '::'
-    # [大多数情况] 默认 '0.0.0.0'
-    # [In most cases] Default to '0.0.0.0'
-    WebuiHost: 0.0.0.0
+    # [默认] '127.0.0.1'，仅允许本机访问
+    # [Default] '127.0.0.1', local access only
+    WebuiHost: 127.0.0.1
     # --port. 监听的端口
     # --port. Port to listen
     # 可通过 `http://{host}:{port}` 访问 WebUI

@@ -4,9 +4,9 @@ version = "2.2.4"
 description = "AzurPilot launcher built with Tauri"
 authors = ["Jianfeng Zhang <swordfeng123@gmail.com>"]
 edition = "2021"
+rust-version = "1.89"
 
 [build-dependencies]
-base64 = "0.22.1"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
@@ -17,17 +17,17 @@ serde_yaml = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 rustls = { version = "0.23.38", default-features = false }
 sha2 = "0.10"
+ed25519-dalek = "2.2.0"
+semver = "1"
 rand = "0.8"
 dirs = "6"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tracing-appender = "0.2"
-command-group = "5.0.1"
 base64 = "0.22.1"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "=2.0.0"
-sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
 ctrlc = "3.5.0"
 chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
 rust-i18n = "3"
@@ -40,11 +40,15 @@ expires-at = "2026-05-28T05:00:00+08:00"
 network-time-url = "https://www.aliyun.com"
 message = "测试已结束，请安装正式版"
 
+[dev-dependencies]
+sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"] }
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["consoleapi", "fileapi", "minwinbase", "processenv", "sddl", "sysinfoapi", "winbase", "winuser"] }
+webview2-com = "=0.37.0"
+winapi = { version = "0.3", features = ["consoleapi", "fileapi", "minwinbase", "processenv", "sddl", "sysinfoapi", "winbase", "winuser", "jobapi", "jobapi2", "processthreadsapi", "handleapi", "tlhelp32", "iphlpapi", "tcpmib", "iprtrmib", "ws2def", "securitybaseapi", "winerror"] }
 tauri-winrt-notification = "0.7.2"
 windows-registry = "0.4"
 
@@ -52,8 +56,12 @@ windows-registry = "0.4"
 tauri-plugin-single-instance = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "=2.0.1"
 openssl-probe = "0.1.6"
 notify-rust = "4.16.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.6.1"
 
 [profile.release]
 opt-level = "z"

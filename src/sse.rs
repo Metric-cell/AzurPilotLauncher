@@ -1,6 +1,7 @@
 //! 旧版后端的 SSE 能力检测；新版 SPA 的 HTML 回退不属于事件流。
 
 use std::{
+    io::{BufRead, Read},
     sync::atomic::{AtomicBool, Ordering},
     thread,
     time::Duration,
@@ -13,6 +14,58 @@ use reqwest::{blocking::Response, header::CONTENT_TYPE, StatusCode};
 pub(crate) enum StreamOutcome {
     Ended,
     Unsupported,
+}
+
+const MAX_LINE_BYTES: usize = 16 * 1024;
+const MAX_EVENT_BYTES: usize = 64 * 1024;
+
+/// 共享的有界 SSE 解码器。无换行和无限 data 行不能持续占用内存。
+pub(crate) struct EventReader<R> {
+    reader: R,
+    data: String,
+}
+
+impl<R: BufRead> EventReader<R> {
+    pub(crate) fn new(reader: R) -> Self {
+        Self {
+            reader,
+            data: String::new(),
+        }
+    }
+
+    pub(crate) fn next(&mut self, allow_exit: &AtomicBool) -> Result<Option<String>> {
+        while !allow_exit.load(Ordering::SeqCst) {
+            let mut line = Vec::new();
+            let bytes = (&mut self.reader)
+                .take((MAX_LINE_BYTES + 1) as u64)
+                .read_until(b'\n', &mut line)?;
+            if allow_exit.load(Ordering::SeqCst) {
+                self.data.clear();
+                return Ok(None);
+            }
+            if bytes > MAX_LINE_BYTES {
+                return Err(anyhow!("event stream line exceeds size limit"));
+            }
+            if bytes == 0 {
+                return Ok((!self.data.is_empty()).then(|| std::mem::take(&mut self.data)));
+            }
+            let line = std::str::from_utf8(&line)?.trim_end_matches(['\r', '\n']);
+            if line.is_empty() && !self.data.is_empty() {
+                return Ok(Some(std::mem::take(&mut self.data)));
+            }
+            if let Some(data) = line.strip_prefix("data:") {
+                let data = data.strip_prefix(' ').unwrap_or(data);
+                if self.data.len() + data.len() + 1 > MAX_EVENT_BYTES {
+                    return Err(anyhow!("event stream payload exceeds size limit"));
+                }
+                if !self.data.is_empty() {
+                    self.data.push('\n');
+                }
+                self.data.push_str(data);
+            }
+        }
+        Ok(None)
+    }
 }
 
 pub(crate) fn is_event_stream(response: &Response) -> Result<bool> {
@@ -57,6 +110,61 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
     };
+
+    #[test]
+    fn exit_during_blocked_read_discards_pending_event() {
+        struct ExitOnDelimiter<'a> {
+            inner: std::io::Cursor<Vec<u8>>,
+            exiting: &'a AtomicBool,
+        }
+        impl Read for ExitOnDelimiter<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.inner.read(buffer)
+            }
+        }
+        impl BufRead for ExitOnDelimiter<'_> {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                let buffer = self.inner.fill_buf()?;
+                if buffer.starts_with(b"\n") {
+                    self.exiting.store(true, Ordering::SeqCst);
+                }
+                Ok(buffer)
+            }
+            fn consume(&mut self, amount: usize) {
+                self.inner.consume(amount);
+            }
+        }
+        let exiting = AtomicBool::new(false);
+        let mut reader = EventReader::new(ExitOnDelimiter {
+            inner: std::io::Cursor::new(b"data: startup.set\n\n".to_vec()),
+            exiting: &exiting,
+        });
+        assert!(reader.next(&exiting).unwrap().is_none());
+        assert!(exiting.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn rejects_unbounded_lines_and_multiline_events() {
+        let exiting = AtomicBool::new(false);
+        let oversized = vec![b'x'; MAX_LINE_BYTES + 1];
+        assert!(EventReader::new(oversized.as_slice())
+            .next(&exiting)
+            .is_err());
+        let repeated = "data: ".to_owned() + &"x".repeat(MAX_LINE_BYTES / 2) + "\n";
+        let oversized = repeated.repeat(9);
+        assert!(EventReader::new(oversized.as_bytes())
+            .next(&exiting)
+            .is_err());
+        let mut reader = EventReader::new(
+            b": heartbeat\r\ndata: first\r\ndata: second\r\n\r\ndata: last".as_slice(),
+        );
+        assert_eq!(
+            reader.next(&exiting).unwrap().as_deref(),
+            Some("first\nsecond")
+        );
+        assert_eq!(reader.next(&exiting).unwrap().as_deref(), Some("last"));
+        assert!(reader.next(&exiting).unwrap().is_none());
+    }
 
     #[test]
     fn accepts_only_sse_media_type() {

@@ -6,7 +6,7 @@
 //! `allow_exit` 标志用于在启动器关闭流程中优雅终止此线程。
 
 use std::{
-    io::{BufRead, BufReader},
+    io::BufReader,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::Deserialize;
@@ -54,14 +54,23 @@ pub fn start_launcher_control_stream(config: WebuiLaunchConfig, allow_exit: Arc<
                 return;
             }
         };
+        if !crate::webview_security::is_loopback_http_origin(&match tauri::Url::parse(&base) {
+            Ok(url) => url,
+            Err(_) => return,
+        }) {
+            info!("Native launcher control is disabled for non-loopback backends");
+            return;
+        }
         let stream_url = format!("{base}api/launcher/stream");
         let report_url = format!("{base}api/launcher/report");
         // 显式禁用系统代理并限制连接超时：控制流是本机回环通信，
         // 走代理既无意义，还可能因系统代理故障而中断
-        let client = match config
-            .http_client_builder()
-            .and_then(|builder| Ok(builder.connect_timeout(Duration::from_secs(5)).build()?))
-        {
+        let client = match config.http_client_builder().and_then(|builder| {
+            Ok(builder
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(30))
+                .build()?)
+        }) {
             Ok(client) => client,
             Err(e) => {
                 warn!("Unable to create launcher control client: {e}");
@@ -112,49 +121,20 @@ fn read_launcher_control_stream(
         return Ok(StreamOutcome::Unsupported);
     }
 
-    let mut reader = BufReader::new(response);
-    let mut data_lines = Vec::new();
-
-    while !allow_exit.load(Ordering::SeqCst) {
-        let mut line = String::new();
-        let bytes = reader.read_line(&mut line)?;
-        if bytes == 0 {
-            break;
-        }
-
-        let line = line.trim_end_matches(['\r', '\n']);
-        // SSE 协议：空行标志一个事件的边界，把此前累积的 data 行整体分发
-        if line.is_empty() {
-            dispatch_sse_data(&mut data_lines, client, report_url);
-            continue;
-        }
-
-        if let Some(data) = line.strip_prefix("data:") {
-            data_lines.push(data.trim_start().to_owned());
+    let mut reader = sse::EventReader::new(BufReader::new(response));
+    while let Some(data) = reader.next(allow_exit)? {
+        match serde_json::from_str::<LauncherCommand>(&data) {
+            Ok(command) if command.id.len() <= 256 && command.command_type.len() <= 64 => {
+                if allow_exit.load(Ordering::SeqCst) {
+                    break;
+                }
+                handle_command(client, report_url, command);
+            }
+            Ok(_) => warn!("Ignoring launcher command with oversized fields"),
+            Err(e) => warn!("Ignoring invalid launcher command: {e}"),
         }
     }
-
-    // 流结束时若仍有未分发的残留事件（缺空行结尾），补一次分发避免丢失
-    dispatch_sse_data(&mut data_lines, client, report_url);
     Ok(StreamOutcome::Ended)
-}
-
-/// 把累积的一批 SSE data 行合并为完整事件并交给指令处理器。
-///
-/// 多行 data 按 SSE 规范用换行符拼接；非 JSON 格式的事件只记录
-/// 警告并丢弃，不中断连接。
-fn dispatch_sse_data(data_lines: &mut Vec<String>, client: &Client, report_url: &str) {
-    if data_lines.is_empty() {
-        return;
-    }
-
-    let data = data_lines.join("\n");
-    data_lines.clear();
-
-    match serde_json::from_str::<LauncherCommand>(&data) {
-        Ok(command) => handle_command(client, report_url, command),
-        Err(e) => warn!("Ignoring invalid launcher command: {e}"),
-    }
 }
 
 /// 执行单条控制指令，并把执行结果回报给后端。
