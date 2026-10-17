@@ -1,0 +1,1 @@
+AzurPilot signed updater fixture

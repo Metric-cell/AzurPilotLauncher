@@ -1,0 +1,3 @@
+# Signatures and digests cover exact bytes, including line endings on Windows.
+src/update/fixtures/* -text
+src/update/fixtures/*.sig binary

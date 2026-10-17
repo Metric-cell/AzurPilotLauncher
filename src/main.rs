@@ -41,6 +41,8 @@ mod preferences;
 mod setup;
 /// 窗口工具（控制台附着状态等平台辅助）。
 mod window_util;
+/// 签名自更新的独立实现，后续应用装配时替换旧更新入口。
+mod update;
 
 #[macro_use]
 extern crate rust_i18n;

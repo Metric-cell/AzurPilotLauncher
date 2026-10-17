@@ -30,6 +30,20 @@ const DEFAULT_LAUNCHER_UPDATE_URL: &str =
 /// `CARGO_MANIFEST_DIR` 缺失、base64 解码失败、本地证书读取失败，或
 /// REQUIRE_LAUNCHER_MTLS_IDENTITY 已设置但证书缺失时直接 panic。
 fn main() {
+    for (name, default) in [
+        ("AZURPILOT_UPDATE_MANIFEST_URL", ""),
+        ("AZURPILOT_UPDATE_PUBLIC_KEY", ""),
+        ("AZURPILOT_UPDATE_PAYLOAD_ORIGINS", ""),
+        ("AZURPILOT_UPDATE_METADATA_ORIGINS", ""),
+        ("AZURPILOT_UPDATE_CHANNEL", "stable"),
+        ("AZURPILOT_UPDATE_MIN_SEQUENCE", "0"),
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
+        let value = env::var(name).unwrap_or_else(|_| default.to_owned());
+        assert!(!value.contains(['\r', '\n', '\0']), "invalid build configuration {name}");
+        println!("cargo:rustc-env={name}={value}");
+    }
+
     // 内嵌 manifest：requireAdministrator 保证启动器始终以管理员运行，
     // 以便执行需要提权的安装与修复操作；Common-Controls 6 启用现代视觉
     // 样式，确保原生控件外观一致。

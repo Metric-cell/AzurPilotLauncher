@@ -207,3 +207,7 @@ GitHub Actions（`.github/workflows/package.yml`）：
 - 后端连接检查超时：500 毫秒
 - 通知流断线重连间隔：3 秒
 - `UV_PYTHON_INSTALL_MIRROR` 默认使用 npmmirror 加速 Python standalone 下载，并以 python-standalone.org 作为备用源
+
+### 签名更新模块
+
+`src/update/` 提供 Ed25519 原始清单签名、逐跳 HTTPS 来源约束、版本与序号回退保护、长度与 SHA256 校验及安装前复验。签名私钥仅用于发行，不嵌入程序；配置和签名工具见 [签名更新](docs/update-security.md)。本拆分提交先加入实现和测试，运行入口将在安全重构的应用装配提交中切换。
