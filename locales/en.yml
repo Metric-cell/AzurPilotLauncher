@@ -108,6 +108,8 @@ dialog:
   nodejs_install_failed: "Node.js installation failed"
   nodejs_install_failed_detail: "Node.js could not be installed automatically. Please try again or install it manually.\n\n%{error}"
   confirm_exit: "Are you sure you want to leave? You can exit or let it run silently in the background."
+  close_remember_hint: "This choice will be remembered. You can change it in System Settings."
+  close_save_failed: "Could not save the close preference. Please try again."
   exit: "Exit"
   minimize_to_tray: "Minimize to tray"
   starting: "Starting"
@@ -167,6 +169,8 @@ autostart:
   set_failed: "Failed to set autostart: %{error}"
 
 errors:
+  save_launcher_preferences: "Could not save launcher settings: %{error}"
+  close_behavior_unsupported: "Background operation is not supported on this system."
   uv_not_found: "Launcher does not have built-in uv, and uv was not found in system PATH"
   write_uv_failed: "Failed to write built-in uv to %{path}"
   requests_install_failed: "Failed to install deploy base dependency: requests"

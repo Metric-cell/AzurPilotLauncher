@@ -131,13 +131,16 @@ Windows 和 Linux 移除原生窗口装饰（`set_decorations(false)`），通�
 
 ### 窗口关闭行为
 
-- **Windows**：弹出关闭选择菜单（"退出" / "最小化到托盘"），托盘化时仅隐藏主窗口，保留 WebView、当前页面和连接；恢复直接显示并聚焦，不重新加载前端。窗口意外丢失时仍通过防重入机制重建。保留 WebView 会占用前端内存
-- **macOS**：最小化到托盘，切换 `ActivationPolicy` 为 `Accessory`（隐藏 Dock 图标），恢复时切回 `Regular`
-- **Linux**：直接隐藏窗口
+- **Windows/macOS**：首次关闭显示“退出 / 最小化到托盘”菜单，选择成功保存后才执行。此后自绘关闭按钮、系统关闭和 Alt+F4 共用原生偏好。macOS 保留原生标题栏，仅注入关闭菜单。
+- **Linux**：无系统托盘，关闭直接退出，不提供后台选项，忽略 `--start-minimized`。
+- 偏好由 `src/preferences.rs` 的 `PreferenceStore` 保存在 Tauri `app_config_dir()/preferences.json`，与 WebView 存储、后端部署配置独立。通过同目录临时文件、同步及原子替换持久化，保存失败保持原先内存状态和窗口，菜单允许重试。缺失或损坏的文件回退首次询问。
+- 系统设置通过 `window.__ALAS_NATIVE__.invoke('get_launcher_preferences')` 读取 `{closeBehavior, backgroundSupported}`，通过 `set_launcher_close_behavior` 的 `{behavior: 'ask' | 'tray' | 'exit'}` 修改。`src/preferences_bridge.js` 在主窗口初始化时安装，仅向本地后端页面提供这两个命令，确保 React 挂载时已可发现；菜单使用 `window_choose_close_behavior` 先保存再关闭。
+- 关闭菜单 JS 位于 `src/ui/titlebar.js`，用 `node --test scripts/test-close-prompt.cjs scripts/test-preferences-bridge.cjs` 验证交互及设置桥接。
+- 托盘化仅隐藏主窗口，保留 WebView、页面和连接；恢复直接显示并聚焦，窗口意外丢失时仍可重建。保留页面会占用前端内存。
 
 ### Tauri 前端命令
 
-`save_as`、`download_today_gui_log`、`download_today_launcher_log`、`retry_backend_connection`、`window_hide`、`window_minimize`、`window_toggle_maximize`、`window_close`、`window_start_dragging`、`window_is_maximized`
+`save_as`、`download_today_gui_log`、`download_today_launcher_log`、`retry_backend_connection`、`window_hide`、`window_minimize`、`window_toggle_maximize`、`window_close`、`get_launcher_preferences`、`set_launcher_close_behavior`、`window_choose_close_behavior`、`window_start_dragging`、`window_is_maximized`
 
 ### 端口占用清理
 
