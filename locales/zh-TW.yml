@@ -92,6 +92,8 @@ launcher_update:
   payload_missing: "啟動器必須更新，但更新伺服器沒有提供 %{platform} 的安裝包。"
 
 dialog:
+  stopping_startup: "正在停止啟動"
+  stopping_startup_detail: "正在等待啟動工作結束，現有 Python 環境將保留。"
   cleaning_env: "正在清理環境"
   cleaning_env_detail: "正在移除未完成的啟動環境，下次啟動會自動完全重建。"
   cleaning_wait: "請稍候，不要手動刪除檔案。"
@@ -175,6 +177,8 @@ autostart:
 errors:
   save_launcher_preferences: "無法儲存啟動器設定：%{error}"
   close_behavior_unsupported: "目前系統不支援背景執行。"
+  nodejs_user_data_dir_not_found: "無法定位目前使用者的本機資料目錄。"
+  workspace_protected: "偵測到本機開發修改，已停止發行更新；請使用 --skip-update 或獨立發行目錄。"
   backend_port_in_use: "後端連接埠 %{port} 已被其他程式占用，請關閉該程式或修改連接埠。"
   backend_invalid_host: "WebUI 主機名稱無效，請填寫單一主機名稱或 IP 位址。"
   backend_startup_cancelled: "後端啟動已取消。"

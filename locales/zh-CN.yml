@@ -92,6 +92,8 @@ launcher_update:
   payload_missing: "启动器必须更新，但更新服务器没有提供 %{platform} 的安装包。"
 
 dialog:
+  stopping_startup: "正在停止启动"
+  stopping_startup_detail: "正在等待启动工作结束，现有 Python 环境将保留。"
   cleaning_env: "正在清理环境"
   cleaning_env_detail: "正在移除未完成的启动环境，下次启动会自动完全重建。"
   cleaning_wait: "请稍候，不要手动删除文件。"
@@ -175,6 +177,8 @@ autostart:
 errors:
   save_launcher_preferences: "无法保存启动器设置：%{error}"
   close_behavior_unsupported: "当前系统不支持后台运行。"
+  nodejs_user_data_dir_not_found: "无法定位当前用户的本地数据目录。"
+  workspace_protected: "检测到本地开发修改，已停止发布更新；请使用 --skip-update 或独立发布目录。"
   backend_port_in_use: "后端端口 %{port} 已被其他程序占用，请关闭该程序或修改端口。"
   backend_invalid_host: "WebUI 主机名无效，请填写单个主机名或 IP 地址。"
   backend_startup_cancelled: "后端启动已取消。"

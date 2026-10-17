@@ -72,7 +72,7 @@ use crate::{
     notify::{start_notify_stream, NotificationClickHandler},
     preferences::{CloseBehavior, PreferenceStore, PreferencesSnapshot, BACKGROUND_SUPPORTED},
     setup::{
-        get_deploy_config, rebuild_venv_and_sync_dependencies, reset_venv_for_rebuild,
+        get_deploy_config, rebuild_venv_and_sync_dependencies,
         setup_alas_repo, setup_environment, SplashUpdate,
     },
 };
@@ -362,11 +362,7 @@ fn tray_icon_for_platform() -> Image<'static> {
     })
 }
 
-/// 启动中断后的清理入口：提示用户、等待 setup 线程停止后重置 venv 并退出。
-///
-/// 多个退出路径（ExitRequested、splash 关闭）都可能触发，通过
-/// startup_cleanup_started 原子标志保证只执行一次。清理成功后置 allow_exit
-/// 并以退出码 0 结束应用；失败则在 splash 上显示错误并复位标志，允许重试。
+/// 取消启动时等待自有工作结束，保留已经存在的运行环境。
 fn begin_startup_cleanup(
     app_handle: tauri::AppHandle,
     allow_exit: Arc<AtomicBool>,
@@ -374,72 +370,35 @@ fn begin_startup_cleanup(
     setup_running: Arc<AtomicBool>,
     startup_cleanup_started: Arc<AtomicBool>,
 ) {
-    // 幂等保护：清理只允许触发一次，后续并发的退出请求直接忽略。
     if startup_cleanup_started
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
         return;
     }
-
-    // 通知 setup 线程尽早取消，避免清理与初始化并发改写环境。
     setup_cancel_requested.store(true, Ordering::SeqCst);
     if let Some(splash) = app_handle.get_webview_window("splash") {
         update_splash(
             &splash,
             &SplashUpdate::loading(
-                t!("dialog.cleaning_env"),
-                t!("dialog.cleaning_env_detail"),
+                t!("dialog.stopping_startup"),
+                t!("dialog.stopping_startup_detail"),
                 99,
-            )
-            .with_subtitle(t!("dialog.cleaning_wait")),
+            ),
         );
     }
 
-    // 弹出说明对话框告知用户"正在清理环境"，此弹窗不阻塞主流程。
-    app_handle
-        .dialog()
-        .message(t!("dialog.cleaning_message"))
-        .title(t!("dialog.cleaning_env"))
-        .show(|_| {});
-
-    // 后台线程执行清理：先等 setup 线程退出（至多 30 秒，100ms 轮询）。
     thread::spawn(move || {
         let started_at = Instant::now();
-        while setup_running.load(Ordering::SeqCst) && started_at.elapsed() < Duration::from_secs(30)
-        {
+        let mut warned = false;
+        while setup_running.load(Ordering::SeqCst) {
+            if !warned && started_at.elapsed() >= Duration::from_secs(30) {
+                warn!("Startup cancellation is taking longer than expected; preserving environment and waiting for owned work to stop");
+                warned = true;
+            }
             thread::sleep(Duration::from_millis(100));
         }
-
-        // 超时仍未退出则记录告警，但继续清理，尽快让进程结束。
-        if setup_running.load(Ordering::SeqCst) {
-            warn!("Setup thread did not stop before startup cleanup timeout");
-        }
-
-        // 重置 venv：下次启动时重新同步依赖，修复可能损坏的运行环境。
-        match reset_venv_for_rebuild() {
-            Ok(()) => {
-                info!("Startup cleanup finished; runtime will be rebuilt on next launch");
-            }
-            Err(e) => {
-                error!("Startup cleanup failed: {:?}", e);
-                if let Some(splash) = app_handle.get_webview_window("splash") {
-                    update_splash(
-                        &splash,
-                        &SplashUpdate::error(
-                            t!("dialog.cleanup_failed"),
-                            t!("dialog.cleanup_failed_detail", error = format!("{e:#}")),
-                            99,
-                        ),
-                    );
-                }
-                // 清理失败：复位标志允许再次触发，不放行退出。
-                startup_cleanup_started.store(false, Ordering::SeqCst);
-                return;
-            }
-        }
-
-        // 清理完成后放行退出并结束进程。
+        info!("Startup cancelled; existing runtime environment preserved");
         allow_exit.store(true, Ordering::SeqCst);
         app_handle.exit(0);
     });
@@ -2840,6 +2799,7 @@ fn main() -> Result<()> {
                                     if let Err(recovery_error) = rebuild_venv_and_sync_dependencies(
                                         &mut status_updater,
                                         setup_cancel_requested.clone(),
+                                        preview_no_update || setup::repository_is_development_workspace(Path::new(".")),
                                     ) {
                                         break Err(recovery_error.context(
                                             "Failed to rebuild .venv after backend startup timeout",

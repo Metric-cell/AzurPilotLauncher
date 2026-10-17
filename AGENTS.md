@@ -24,7 +24,7 @@ cargo check            # 仅检查编译
 - `ALAS_LAUNCHER_MTLS_IDENTITY_PEM_B64`：launcher 自更新的 mTLS 客户端证书（base64 PEM）。未设置时回退读取仓库根目录的 `证书.txt`（不入库）。
 - `LAUNCHER_UPDATE_URL`：覆盖自更新源，默认 `https://ap-launcher-update.nanoda.work/updata/stable.json`。
 
-注意：Windows 构建的 manifest 是 `requireAdministrator`（build.rs 内嵌），本地运行会弹 UAC。
+Windows 构建的 manifest 使用 `asInvoker`，安装器为当前用户安装；不要求管理员运行。Node.js 使用当前用户的便携安装，不修改系统 PATH 或 ACL。
 
 ## 模块职责（src/，行数为 2026-10 实测）
 
@@ -47,8 +47,8 @@ cargo check            # 仅检查编译
 - **日志**：用 `tracing`（info!/warn! 等），初始化后写入 `log/{date}_launcher.txt`，不要用 `println!`。
 - **版本号**：发布需同步 `Cargo.toml`、`tauri.conf.json`、`CHANGELOG.md` 三处。
 - **CI 打包**：仅 `.github/workflows/package.yml`（tag push / 手动触发，三平台矩阵，产 tar.xz）。六个 `deploy.*.yaml` 是运行时部署配置，`-cn` 后缀用国内镜像，改动 `setup.rs` 的依赖安装逻辑时需兼顾两种变体。
-- **CI 测试**：`.github/workflows/test.yml` 在推送 `main`、PR 和手动触发时运行，覆盖 Linux、macOS、Windows x64/ARM64，执行 `cargo check --locked --all-targets` 和 `cargo test --locked --all-targets`，无需发布密钥。Windows 本地测试需在管理员终端运行（manifest 与 Node.js 私有目录 ACL 均要求提权）。
+- **CI 测试**：`.github/workflows/test.yml` 在推送 `main`、PR 和手动触发时运行，覆盖 Linux、macOS、Windows x64/ARM64，执行 `cargo check --locked --all-targets` 和 `cargo test --locked --all-targets`，无需发布密钥。Windows 本地测试使用普通用户终端；进程测试使用独立临时夹具。
 
 ## 关键常量
 
-WebUI 端口 `22267`；Python `3.14.6`；后端端口等待 60s；SSE 重连 3s。时间炸弹配置在 `Cargo.toml` 的 `[package.metadata.alas-launcher.time-bomb]`（运行时由 `main.rs` 解析，当前 `enabled = false`）。
+WebUI 端口 `22267`；Python `3.14.6`；后端 HTTP(S) 就绪等待 300s（可取消）；SSE 重连 3s。时间炸弹配置在 `Cargo.toml` 的 `[package.metadata.alas-launcher.time-bomb]`（运行时由 `main.rs` 解析，当前 `enabled = false`）。

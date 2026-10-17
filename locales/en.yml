@@ -92,6 +92,8 @@ launcher_update:
   payload_missing: "A launcher update is required, but no package was provided for %{platform}."
 
 dialog:
+  stopping_startup: "Stopping startup"
+  stopping_startup_detail: "Waiting for startup work to stop. The existing Python environment will be preserved."
   cleaning_env: "Cleaning environment"
   cleaning_env_detail: "Removing incomplete startup environment. It will be fully rebuilt on next launch."
   cleaning_wait: "Please wait. Do not delete files manually."
@@ -175,6 +177,8 @@ autostart:
 errors:
   save_launcher_preferences: "Could not save launcher settings: %{error}"
   close_behavior_unsupported: "Background operation is not supported on this system."
+  nodejs_user_data_dir_not_found: "Cannot locate the current user’s local data directory."
+  workspace_protected: "Local development changes detected; release update stopped. Use --skip-update or a separate deployment directory."
   backend_port_in_use: "Backend port %{port} is used by another program. Close it or change the port."
   backend_invalid_host: "Invalid WebUI host. Enter a single hostname or IP address."
   backend_startup_cancelled: "Backend startup was cancelled."
