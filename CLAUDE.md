@@ -18,7 +18,7 @@ python3 scripts/test-sign-launcher-update.py
 
 应用先显示内嵌 splash，后台完成自身更新检查、环境准备和后端 HTTP(S) 就绪检查，然后显示主窗口并按后端能力订阅桌面通知与控制流。`--skip-update` 跳过发布更新，开发检出保留配置与锁文件；`--preview-crash` 隐含跳过更新并模拟启动失败。取消启动等待自有工作停止，保留现有环境。
 
-Windows/macOS 提供托盘；首次关闭询问退出或托盘化，成功保存选择后才执行，后续系统关闭和标题栏共用原生偏好。托盘化只隐藏窗口，保留 WebView、页面和连接；窗口意外丢失时仍可重建。macOS 保留系统窗口按钮并切换 Dock 激活策略。Linux 没有托盘，关闭退出，`--start-minimized` 不隐藏窗口。
+Windows/macOS 提供托盘；首次关闭询问退出或托盘化，成功保存选择后才执行，后续系统关闭和标题栏共用原生偏好。托盘化只隐藏窗口，保留 WebView、页面和连接；窗口意外丢失时仍可重建。macOS 保留系统窗口按钮并切换 Dock 激活策略。Linux 没有托盘，关闭退出，`--start-minimized` 不隐藏窗口。远端或占位页面不能展示原生关闭菜单，询问模式退回托盘，不修改已保存的偏好。
 
 `preferences.rs` 把关闭偏好原子保存在 `app_config_dir()/preferences.json`，保存失败不更新内存状态。托盘菜单“关闭窗口时”提供询问、托盘和退出选项，仅保存设置，不立即关闭窗口；该功能无需后端修改。后端设置页面可选调用统一安全 bridge 的 `get_launcher_preferences` / `set_launcher_close_behavior` 接口，关闭选择使用 `window_choose_close_behavior`；三个命令按来源、角色、主框架凭证和窗口可见性校验。
 

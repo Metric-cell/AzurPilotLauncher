@@ -126,6 +126,8 @@ node --test scripts/test-close-prompt.cjs scripts/test-webview-bridge.cjs
 后端设置可通过统一的 `__ALAS_NATIVE__` 调用读取/设置命令；这两个命令仅授权本地后端。错误页只额外获得首次关闭选择命令，splash 无偏好权限。移除早期独立 `preferences_bridge.js`，避免重复定义桥或绕过角色 token。Rust 矩阵测试与 Node 动态测试覆盖三个偏好命令、错误角色/子框架/错误 token、设置参数转发及跨角色导航后的旧 wrapper 拒绝。
 
 托盘化保留主窗口及页面连接，只执行隐藏；恢复仍受 `StartupState` 门槛控制，窗口意外丢失时可重新创建。Linux 无托盘且直接退出，macOS 保留系统标题栏并注入关闭菜单。
+
+远端或占位页面没有原生关闭菜单。Windows/macOS 在“询问”模式下关闭这类页面时，由 Rust 根据当前来源直接退回托盘，不依赖异步 `eval` 报告 JavaScript 异常；用户保存的退出/托盘偏好继续生效，偏好文件不因退路而修改，也不向远端增加 bridge 权限。
 ## 固定项目链接
 
 可信本地主页面中真实的左键点击可将 `https://github.com/wess09/AzurPilot`（可带末尾斜杠）交给系统浏览器。命令只打开编译时固定的上游地址，不接受页面提供的 URL 或程序参数；其他外链、脚本点击、弹窗和表单不能借此获得通用浏览器入口。Windows 在工作线程内使用 ShellExecuteExW，macOS/Linux 使用系统浏览器工具；失败显示本地化错误。

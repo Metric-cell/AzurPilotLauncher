@@ -486,9 +486,69 @@ fn start_minimized_arg_present() -> bool {
     launcher_arg_present(START_MINIMIZED_ARGS)
 }
 
+/// 未获得原生界面权限的页面无法展示关闭菜单，询问模式退回托盘。
+/// 保存的退出/托盘选择照常生效；这里不修改用户偏好或网页权限。
+fn close_behavior_for_current_document(
+    behavior: preferences::CloseBehavior,
+    policy: &webview_security::WebviewPolicy,
+    current_url: Option<&Url>,
+) -> preferences::CloseBehavior {
+    if behavior == preferences::CloseBehavior::Ask
+        && !current_url.is_some_and(|url| policy.can_inject("main", url, url))
+    {
+        preferences::CloseBehavior::Tray
+    } else {
+        behavior
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unprivileged_pages_close_without_a_webview_chooser() {
+        use preferences::CloseBehavior;
+        let remote_origin = Url::parse("http://192.0.2.1:22267/").unwrap();
+        let remote = remote_origin.join("tasks").unwrap();
+        let remote_policy = webview_security::WebviewPolicy::new(&remote_origin).unwrap();
+        let local_origin = Url::parse("http://127.0.0.1:22267/").unwrap();
+        let local_policy = webview_security::WebviewPolicy::new(&local_origin).unwrap();
+        let blank = Url::parse("about:blank").unwrap();
+        for (policy, url) in [
+            (&remote_policy, Some(&remote)),
+            (&local_policy, Some(&remote)),
+            (&local_policy, Some(&blank)),
+            (&local_policy, None),
+        ] {
+            assert_eq!(
+                close_behavior_for_current_document(CloseBehavior::Ask, policy, url),
+                CloseBehavior::Tray
+            );
+        }
+        assert!(!remote_policy.can_inject("main", &remote, &remote));
+    }
+
+    #[test]
+    fn trusted_close_choosers_and_saved_actions_keep_their_behavior() {
+        use preferences::CloseBehavior;
+        let local_origin = Url::parse("http://127.0.0.1:22267/").unwrap();
+        let local = local_origin.join("tasks").unwrap();
+        let policy = webview_security::WebviewPolicy::new(&local_origin).unwrap();
+        let error = Url::parse(webview_security::BACKEND_ERROR_URL_BASE).unwrap();
+        for url in [&local, &error] {
+            assert_eq!(
+                close_behavior_for_current_document(CloseBehavior::Ask, &policy, Some(url)),
+                CloseBehavior::Ask
+            );
+        }
+        for behavior in [CloseBehavior::Exit, CloseBehavior::Tray] {
+            assert_eq!(
+                close_behavior_for_current_document(behavior, &policy, None),
+                behavior
+            );
+        }
+    }
 
     #[test]
     fn redacted_navigation_url_preserves_ipv6_and_removes_secrets() {
@@ -1396,16 +1456,22 @@ fn main() -> Result<()> {
                     if label == "main" && !allow_exit.load(Ordering::SeqCst) {
                         api.prevent_close();
                         use preferences::CloseBehavior;
-                        match app_handle.state::<preferences::PreferenceStore>()
-                            .close_behavior(preferences::BACKGROUND_SUPPORTED)
-                        {
+                        let main_window = app_handle.get_webview_window("main");
+                        let current_url = main_window.as_ref().and_then(|window| window.url().ok());
+                        let behavior = close_behavior_for_current_document(
+                            app_handle.state::<preferences::PreferenceStore>()
+                                .close_behavior(preferences::BACKGROUND_SUPPORTED),
+                            &app_handle.state::<webview_security::WebviewPolicy>(),
+                            current_url.as_ref(),
+                        );
+                        match behavior {
                             CloseBehavior::Exit => {
                                 allow_exit.store(true, Ordering::SeqCst);
                                 app_handle.exit(0);
                             }
                             CloseBehavior::Tray => minimize_main_window_to_tray(&app_handle),
                             CloseBehavior::Ask => {
-                                if let Some(main_window) = app_handle.get_webview_window("main") {
+                                if let Some(main_window) = main_window {
                                     if let Err(err) = main_window.eval(
                                         "if (typeof window.__ALAS_OPEN_CLOSE_PROMPT !== 'function') { throw new Error('close prompt is unavailable'); } window.__ALAS_OPEN_CLOSE_PROMPT();",
                                     ) {
