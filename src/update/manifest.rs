@@ -35,7 +35,7 @@ impl Config {
         channel: Option<&str>,
         min_sequence: Option<&str>,
     ) -> Result<Option<Self>> {
-        // 缺一个信任根就禁用，尤其不能读取旧 LAUNCHER_UPDATE_URL 或默认上游。
+        // 签名协议需要完整信任配置；上层一旦显式选择签名协议，缺失即报错。
         let (Some(url), Some(key)) = (nonempty(url), nonempty(key)) else {
             return Ok(None);
         };
@@ -162,8 +162,8 @@ impl Config {
         if data.expires_at <= data.issued_at || data.expires_at - data.issued_at > MAX_LIFETIME {
             bail!("signed update manifest has an invalid validity interval");
         }
-        if require_fresh && (data.expires_at <= now || data.issued_at > now.saturating_add(300)) {
-            bail!("signed update manifest is expired or issued in the future");
+        if require_fresh && data.issued_at > now.saturating_add(300) {
+            bail!("signed update manifest is issued in the future");
         }
         let version = parse_version(&data.version)?;
         if data.artifacts.is_empty() || data.artifacts.len() > 16 {
@@ -182,6 +182,11 @@ impl Config {
                 bail!("signed update payload size is outside its limit");
             }
         }
+        // 只有签名、来源、字段和载荷约束全部通过才分类为可延期更新。
+        // 替换入口仍要求 fresh=true，不能执行过期清单授权的文件。
+        if require_fresh && data.expires_at <= now {
+            return Err(ExpiredManifest.into());
+        }
         Ok(VerifiedManifest {
             data,
             version,
@@ -189,6 +194,17 @@ impl Config {
         })
     }
 }
+
+#[derive(Debug)]
+pub(super) struct ExpiredManifest;
+
+impl std::fmt::Display for ExpiredManifest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("authenticated launcher update manifest has expired; update deferred")
+    }
+}
+
+impl std::error::Error for ExpiredManifest {}
 
 fn nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())

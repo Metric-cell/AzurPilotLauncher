@@ -1,8 +1,9 @@
-//! 已签名的启动器自更新。信任根仅来自编译期 URL、公钥和来源白名单。
+//! 启动器自更新：默认兼容原发行服务，可由维护者显式选择独立签名协议。
 //!
 //! 主进程只负责把 [`Progress`] 转成界面消息，并在 [`Outcome::Restarted`]
 //! 后退出。网络策略、签名、回退保护、下载和替换均封装在此模块。
 mod install;
+mod legacy;
 mod manifest;
 mod transport;
 
@@ -13,9 +14,8 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use tracing::info;
 
-use install::{Installation, StagingDir};
+use install::{Installation, StagingDir, UpdateVerifier};
 use manifest::Config;
 use transport::HttpTransport;
 
@@ -33,14 +33,59 @@ pub(crate) enum Progress {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Outcome {
-    Disabled,
     Skipped,
     Current,
     Cancelled,
     Restarted,
 }
 
-/// 检查更新，验证后替换本程序并重启。缺少 URL 或公钥时不进行任何网络请求。
+enum UpdateConfig {
+    Legacy(legacy::Config),
+    Signed(Config),
+}
+
+impl UpdateConfig {
+    fn from_values(
+        url: Option<&str>,
+        key: Option<&str>,
+        payload_origins: Option<&str>,
+        metadata_origins: Option<&str>,
+        channel: Option<&str>,
+        min_sequence: Option<&str>,
+        legacy_url: &str,
+    ) -> Result<Self> {
+        let signed_requested = [url, key, payload_origins, metadata_origins]
+            .into_iter()
+            .flatten()
+            .any(|value| !value.trim().is_empty());
+        if signed_requested {
+            let mut config = Config::from_values(url, key, payload_origins, channel, min_sequence)?
+                .context("signed updates require both a compiled manifest URL and public key")?;
+            config.allow_metadata_origins(metadata_origins)?;
+            return Ok(Self::Signed(config));
+        }
+        Ok(Self::Legacy(legacy::Config::from_values(
+            legacy_url,
+            Some("https://ap.launcher-update.nanoda.work/updata/stable.json"),
+        )?))
+    }
+}
+
+impl UpdateVerifier for UpdateConfig {
+    fn staged_artifact(
+        &self,
+        installation: &Installation,
+        snapshot_path: &Path,
+        cancelled: &AtomicBool,
+    ) -> Result<manifest::Artifact> {
+        match self {
+            Self::Legacy(config) => config.staged_artifact(installation, snapshot_path, cancelled),
+            Self::Signed(config) => config.staged_artifact(installation, snapshot_path, cancelled),
+        }
+    }
+}
+
+/// 协议仅由编译配置选择；签名失败不能触发退回旧协议。
 pub(crate) fn check_and_restart(
     cancelled: &AtomicBool,
     mut progress: impl FnMut(Progress),
@@ -56,14 +101,16 @@ fn check_and_restart_inner(
     progress: &mut impl FnMut(Progress),
 ) -> Result<Outcome> {
     check_cancelled(cancelled)?;
-    let Some(config) = compiled_config()? else {
-        info!("Launcher self-update is disabled: no complete compiled trust configuration");
-        return Ok(Outcome::Disabled);
-    };
     if std::env::var_os(SKIP_ENV).is_some() {
         std::env::remove_var(SKIP_ENV);
         return Ok(Outcome::Skipped);
     }
+    let config = match compiled_config()? {
+        UpdateConfig::Legacy(config) => {
+            return legacy::check_and_restart(&config, cancelled, progress);
+        }
+        UpdateConfig::Signed(config) => config,
+    };
     let installation = Installation::current(cancelled)?;
     let _lock = installation.lock(cancelled)?;
     check_cancelled(cancelled)?;
@@ -125,18 +172,16 @@ fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
-fn compiled_config() -> Result<Option<Config>> {
-    let mut config = Config::from_values(
+fn compiled_config() -> Result<UpdateConfig> {
+    UpdateConfig::from_values(
         option_env!("AZURPILOT_UPDATE_MANIFEST_URL"),
         option_env!("AZURPILOT_UPDATE_PUBLIC_KEY"),
         option_env!("AZURPILOT_UPDATE_PAYLOAD_ORIGINS"),
+        option_env!("AZURPILOT_UPDATE_METADATA_ORIGINS"),
         option_env!("AZURPILOT_UPDATE_CHANNEL"),
         option_env!("AZURPILOT_UPDATE_MIN_SEQUENCE"),
-    )?;
-    if let Some(config) = &mut config {
-        config.allow_metadata_origins(option_env!("AZURPILOT_UPDATE_METADATA_ORIGINS"))?;
-    }
-    Ok(config)
+        env!("LAUNCHER_UPDATE_URL"),
+    )
 }
 
 fn unix_now() -> Result<u64> {
@@ -150,9 +195,14 @@ fn is_mini(version: &str) -> bool {
     version.strip_prefix('v').unwrap_or(version) == "0.0.1"
 }
 
-/// 仅元数据服务的连接失败、超时或 5xx 允许完整离线安装继续启动。
-/// 签名、来源、版本、格式和载荷校验失败不能转成离线放行。
+/// 正式版可延期已认证但过期的可选更新；服务不可用仅放行完整离线环境。
+/// 无效签名、来源、格式和载荷校验失败不触发协议降级或离线放行。
 pub(crate) fn can_continue_offline(error: &anyhow::Error, version: &str, root: &Path) -> bool {
+    // 已认证但过期的可选签名元数据只阻止安装更新，不能把正式启动器变成
+    // 七天后无法运行的程序；mini 仍必须获取完整启动器。
+    if !is_mini(version) && error.downcast_ref::<manifest::ExpiredManifest>().is_some() {
+        return true;
+    }
     let python = if cfg!(windows) {
         ".venv/Scripts/python.exe"
     } else {
@@ -168,7 +218,7 @@ pub(crate) fn can_continue_offline(error: &anyhow::Error, version: &str, root: &
 pub(crate) fn try_apply_from_args() -> Result<bool> {
     #[cfg(windows)]
     {
-        install::try_apply_from_args(compiled_config, unix_now)
+        install::try_apply_from_args(compiled_config)
     }
     #[cfg(not(windows))]
     {

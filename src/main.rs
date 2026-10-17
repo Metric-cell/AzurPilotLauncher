@@ -1125,7 +1125,8 @@ fn main() -> Result<()> {
                             match update::check_and_restart(&setup_cancel_requested, |progress| {
                                 let (detail, percent) = match progress {
                                     update::Progress::Available { version } => (t!("launcher_update.available_detail", version = version).to_string(), 8),
-                                    update::Progress::Downloading { downloaded, total } => (format!("{downloaded} / {total} bytes"), 8 + ((downloaded.saturating_mul(80) / total.max(1)).min(80) as u8)),
+                                    update::Progress::Downloading { downloaded, total: 0 } => (format!("{downloaded} bytes"), 8),
+                                    update::Progress::Downloading { downloaded, total } => (format!("{downloaded} / {total} bytes"), 8 + ((downloaded.saturating_mul(80) / total).min(80) as u8)),
                                     update::Progress::Verifying => (t!("launcher_update.verifying_detail").to_string(), 90),
                                     update::Progress::Restarting => (t!("launcher_update.restarting_detail").to_string(), 95),
                                 };
@@ -1141,7 +1142,7 @@ fn main() -> Result<()> {
                                 Ok(update::Outcome::Cancelled) => return,
                                 Ok(_) => {}
                                 Err(e) if update::can_continue_offline(&e, env!("CARGO_PKG_VERSION"), Path::new(".")) => {
-                                    warn!("Launcher update service unavailable; continuing with installed launcher: {e:#}");
+                                    warn!("Launcher update deferred; continuing with installed launcher: {e:#}");
                                 }
                                 Err(e) => {
                                     warn!("Required launcher update failed: {e:#}");

@@ -28,6 +28,16 @@ pub(super) trait Transport {
     fn get(&self, url: &Url, payload: bool) -> Result<Reply>;
 }
 
+pub(super) trait UrlPolicy {
+    fn validate_url(&self, url: &Url, payload: bool) -> Result<()>;
+}
+
+impl UrlPolicy for Config {
+    fn validate_url(&self, url: &Url, payload: bool) -> Result<()> {
+        Config::validate_url(self, url, payload)
+    }
+}
+
 pub(super) struct Reply {
     pub status: u16,
     pub location: Option<String>,
@@ -36,37 +46,76 @@ pub(super) struct Reply {
     pub body: Box<dyn Read>,
 }
 
-pub(super) struct HttpTransport(Client);
+pub(super) struct HttpTransport {
+    metadata: Client,
+    payload: Client,
+}
 
 impl HttpTransport {
     pub(super) fn new() -> Result<Self> {
-        // 手动逐跳校验；不加载任何旧 mTLS 身份，保留用户系统代理、禁用自动解压。
-        Ok(Self(
-            Client::builder()
-                .https_only(true)
-                .redirect(Policy::none())
-                .referer(false)
-                .no_gzip()
-                .no_brotli()
-                .no_deflate()
-                .no_zstd()
-                .connect_timeout(Duration::from_secs(15))
-                .timeout(Duration::from_secs(15))
-                .user_agent(concat!("AzurPilot-Updater/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .context("create secure launcher update HTTP client")?,
-        ))
+        // Signed sources never inherit the legacy service's client identity.
+        let metadata = Self::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .context("create signed update metadata client")?;
+        let payload = Self::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("create signed update payload client")?;
+        Ok(Self { metadata, payload })
+    }
+
+    fn builder() -> reqwest::blocking::ClientBuilder {
+        Client::builder()
+            .https_only(true)
+            .redirect(Policy::none())
+            .referer(false)
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
+            .connect_timeout(Duration::from_secs(15))
+            .user_agent(concat!("AzurPilot-Updater/", env!("CARGO_PKG_VERSION")))
+    }
+
+    pub(super) fn legacy() -> Result<Self> {
+        // Preserve the existing service's payload authentication. The public
+        // manifest client never receives the embedded mTLS identity.
+        let builder = || {
+            Self::builder()
+                .no_proxy()
+                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 AZURPILOT_LAUNCHER_UPDATE/2.0.4")
+        };
+        let metadata = builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .context("create public update metadata client")?;
+        let identity = include_bytes!(concat!(env!("OUT_DIR"), "/launcher_mtls_identity.pem"));
+        let mut payload = builder().timeout(Duration::from_secs(30));
+        if !identity.is_empty() {
+            payload = payload.identity(
+                reqwest::Identity::from_pem(identity)
+                    .context("parse compiled launcher payload client identity")?,
+            );
+        }
+        let payload = payload.build().context("create update payload client")?;
+        Ok(Self { metadata, payload })
     }
 }
 
 impl Transport for HttpTransport {
     fn get(&self, url: &Url, payload: bool) -> Result<Reply> {
-        let mut request = self.0.get(url.clone()).header(ACCEPT_ENCODING, "identity");
-        if payload {
-            // blocking reqwest 没有独立 read_timeout；总期限保证关闭启动画面后
-            // 至多等待当前请求 30 秒，然后把控制权交还取消检查。
-            request = request.timeout(Duration::from_secs(30));
+        let client = if payload {
+            &self.payload
+        } else {
+            &self.metadata
+        };
+        let mut request = client.get(url.clone()).header(ACCEPT_ENCODING, "identity");
+        if !payload {
+            request = request.timeout(Duration::from_secs(15));
         }
+        // Payloads use the blocking client's per-operation timeout, reset on
+        // each read. A request timeout here would cap the entire large download.
         let response = request.send().context("request launcher update")?;
         if response.headers().get_all(LOCATION).iter().count() > 1 {
             bail!("update response has multiple Location headers");
@@ -99,7 +148,7 @@ impl Transport for HttpTransport {
 
 fn request_following(
     transport: &impl Transport,
-    config: &Config,
+    config: &impl UrlPolicy,
     first: &Url,
     payload: bool,
     cancelled: &AtomicBool,
@@ -164,28 +213,15 @@ pub(super) fn fetch_manifest(
     })
 }
 
-fn fetch_metadata(
+pub(super) fn fetch_metadata(
     transport: &impl Transport,
-    config: &Config,
+    config: &impl UrlPolicy,
     url: &Url,
     limit: usize,
     cancelled: &AtomicBool,
 ) -> Result<Vec<u8>> {
-    let response =
-        request_following(transport, config, url, false, cancelled).map_err(|error| {
-            if error.chain().any(|cause| {
-                cause
-                    .downcast_ref::<reqwest::Error>()
-                    .is_some_and(|cause| cause.is_connect() || cause.is_timeout())
-            }) {
-                anyhow::Error::new(Unavailable(
-                    "launcher update metadata service is unavailable".to_owned(),
-                ))
-                .context(error)
-            } else {
-                error
-            }
-        })?;
+    let response = request_following(transport, config, url, false, cancelled)
+        .map_err(classify_metadata_error)?;
     if (500..=599).contains(&response.status) {
         return Err(Unavailable(format!(
             "launcher update metadata returned HTTP {}",
@@ -199,7 +235,28 @@ fn fetch_metadata(
     if response.length.is_some_and(|length| length > limit as u64) {
         bail!("launcher update metadata exceeds its size limit");
     }
-    read_limited(response.body, limit, cancelled)
+    read_limited(response.body, limit, cancelled).map_err(classify_metadata_error)
+}
+
+fn classify_metadata_error(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<super::Cancelled>().is_some() {
+        return error;
+    }
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|cause| cause.is_connect() || cause.is_timeout())
+            || cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|cause| cause.kind() == std::io::ErrorKind::TimedOut)
+    }) {
+        anyhow::Error::new(Unavailable(
+            "launcher update metadata service is unavailable".to_owned(),
+        ))
+        .context(error)
+    } else {
+        error
+    }
 }
 
 pub(super) fn read_limited(
@@ -233,13 +290,59 @@ pub(super) fn download_payload(
     progress: &mut impl FnMut(Progress),
     cancelled: &AtomicBool,
 ) -> Result<()> {
+    download_with_size(
+        transport,
+        config,
+        &manifest::secure_url(&artifact.url)?,
+        &artifact.sha256,
+        Some(artifact.size),
+        path,
+        progress,
+        cancelled,
+    )?;
+    Ok(())
+}
+
+pub(super) fn download_legacy_payload(
+    transport: &impl Transport,
+    config: &impl UrlPolicy,
+    url: &Url,
+    sha256: &str,
+    path: &Path,
+    progress: &mut impl FnMut(Progress),
+    cancelled: &AtomicBool,
+) -> Result<u64> {
+    download_with_size(
+        transport, config, url, sha256, None, path, progress, cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn download_with_size(
+    transport: &impl Transport,
+    config: &impl UrlPolicy,
+    url: &Url,
+    sha256: &str,
+    expected_size: Option<u64>,
+    path: &Path,
+    progress: &mut impl FnMut(Progress),
+    cancelled: &AtomicBool,
+) -> Result<u64> {
     check_cancelled(cancelled)?;
-    let url = manifest::secure_url(&artifact.url)?;
-    let mut response = request_following(transport, config, &url, true, cancelled)?;
+    let expected_hash = manifest::decode_hex::<32>(sha256)?;
+    if expected_size.is_some_and(|size| size == 0 || size > manifest::MAX_PAYLOAD_BYTES) {
+        bail!("launcher update payload size is outside its limit");
+    }
+    let mut response = request_following(transport, config, url, true, cancelled)?;
     if response.status != 200 {
         bail!("launcher update payload returned HTTP {}", response.status);
     }
-    if response.length.is_some_and(|size| size != artifact.size) {
+    if response
+        .length
+        .is_some_and(|size| size == 0 || size > manifest::MAX_PAYLOAD_BYTES)
+        || expected_size
+            .is_some_and(|expected| response.length.is_some_and(|size| size != expected))
+    {
         bail!("launcher update payload has an unexpected Content-Length");
     }
     let mut file = install::create_new_file(path)?;
@@ -247,9 +350,10 @@ pub(super) fn download_payload(
     let mut downloaded = 0u64;
     let mut buffer = [0u8; 128 * 1024];
     let mut last_report = Instant::now();
+    let limit = expected_size.unwrap_or(manifest::MAX_PAYLOAD_BYTES);
     loop {
         check_cancelled(cancelled)?;
-        let remaining = artifact.size.saturating_sub(downloaded) + 1;
+        let remaining = limit.saturating_sub(downloaded) + 1;
         let read_limit = (remaining.min(buffer.len() as u64)) as usize;
         let count = response.body.read(&mut buffer[..read_limit]);
         check_cancelled(cancelled)?;
@@ -258,25 +362,35 @@ pub(super) fn download_payload(
             break;
         }
         downloaded += count as u64;
-        if downloaded > artifact.size {
-            bail!("launcher update payload exceeds its signed size");
+        if downloaded > limit {
+            bail!("launcher update payload exceeds its size limit");
         }
         file.write_all(&buffer[..count])
             .context("write launcher update payload")?;
         hasher.update(&buffer[..count]);
-        if last_report.elapsed() >= Duration::from_millis(200) || downloaded == artifact.size {
+        if last_report.elapsed() >= Duration::from_millis(200) || expected_size == Some(downloaded)
+        {
             progress(Progress::Downloading {
                 downloaded,
-                total: artifact.size,
+                total: expected_size.or(response.length).unwrap_or(0),
             });
             check_cancelled(cancelled)?;
             last_report = Instant::now();
         }
     }
-    check_payload(artifact, downloaded, &hasher.finalize())?;
+    if downloaded == 0
+        || expected_size
+            .or(response.length)
+            .is_some_and(|size| downloaded != size)
+    {
+        bail!("launcher update payload is empty or truncated");
+    }
+    if expected_hash[..] != hasher.finalize()[..] {
+        bail!("launcher update SHA-256 verification failed");
+    }
     check_cancelled(cancelled)?;
     file.sync_all().context("flush launcher update payload")?;
-    Ok(())
+    Ok(downloaded)
 }
 
 pub(super) fn verify_payload(

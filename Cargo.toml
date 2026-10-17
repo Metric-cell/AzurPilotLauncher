@@ -7,6 +7,7 @@ edition = "2021"
 rust-version = "1.89"
 
 [build-dependencies]
+base64 = "0.22.1"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]

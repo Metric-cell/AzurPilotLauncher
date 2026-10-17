@@ -28,7 +28,93 @@ const NOW: u64 = 1_800_000_000;
 const PAYLOAD: &[u8] = include_bytes!("fixtures/payload.txt");
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
-fn config() -> Config {
+#[test]
+fn existing_release_protocol_remains_default_and_signed_configuration_cannot_downgrade() {
+    assert!(matches!(
+        UpdateConfig::from_values(None, None, None, None, None, None, SOURCE).unwrap(),
+        UpdateConfig::Legacy(_)
+    ));
+    assert!(matches!(
+        UpdateConfig::from_values(
+            Some(SOURCE),
+            Some(PUBLIC_KEY),
+            None,
+            None,
+            None,
+            None,
+            SOURCE
+        )
+        .unwrap(),
+        UpdateConfig::Signed(_)
+    ));
+    for (url, key) in [(Some(SOURCE), None), (None, Some(PUBLIC_KEY))] {
+        assert!(UpdateConfig::from_values(url, key, None, None, None, None, SOURCE).is_err());
+    }
+    assert!(UpdateConfig::from_values(
+        None,
+        None,
+        Some("https://cdn.example.invalid"),
+        None,
+        None,
+        None,
+        SOURCE,
+    )
+    .is_err());
+    assert!(UpdateConfig::from_values(
+        Some(SOURCE),
+        Some("invalid key"),
+        None,
+        None,
+        None,
+        None,
+        SOURCE,
+    )
+    .is_err());
+}
+
+#[test]
+fn authenticated_expiry_defers_updates_without_blocking_a_full_launch_or_authorizing_installation()
+{
+    let mut value = fixture_json();
+    let now = unix_now().unwrap();
+    value["issued_at"] = json!(now - 7200);
+    value["expires_at"] = json!(now - 3600);
+    value["artifacts"][0]["platform"] = json!(manifest::platform_key());
+    let signed = sign(&value);
+    let error = config().verify(&signed, now, true).unwrap_err();
+    assert!(error.downcast_ref::<manifest::ExpiredManifest>().is_some());
+    let root = TempDir::new().unwrap();
+    assert!(can_continue_offline(&error, "2.2.4", root.path()));
+    assert!(!can_continue_offline(&error, "0.0.1", root.path()));
+
+    let installation = installation(root.path());
+    let staging = StagingDir::create(root.path()).unwrap();
+    staging.write_snapshot(&signed).unwrap();
+    fs::write(staging.payload_path(), PAYLOAD).unwrap();
+    assert!(installation
+        .promote_verified(&config(), &staging, &ACTIVE)
+        .is_err());
+    assert_eq!(
+        fs::read(root.path().join(if cfg!(windows) {
+            "launcher.exe"
+        } else {
+            "launcher"
+        }))
+        .unwrap(),
+        b"original launcher fixture"
+    );
+
+    let mut tampered = signed;
+    tampered.signature[0] ^= 1;
+    let error = config().verify(&tampered, now, true).unwrap_err();
+    assert!(!can_continue_offline(&error, "2.2.4", root.path()));
+    value["artifacts"][0]["url"] = json!("https://evil.example.invalid/payload");
+    let error = config().verify(&sign(&value), now, true).unwrap_err();
+    assert!(error.downcast_ref::<manifest::ExpiredManifest>().is_none());
+    assert!(!can_continue_offline(&error, "2.2.4", root.path()));
+}
+
+pub(super) fn config() -> Config {
     Config::from_values(Some(SOURCE), Some(PUBLIC_KEY), None, None, None)
         .unwrap()
         .unwrap()

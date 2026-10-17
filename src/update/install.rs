@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     check_cancelled,
-    manifest::{self, Config, SignedManifest, VerifiedManifest, MAX_SNAPSHOT_BYTES},
+    manifest::{self, Artifact, Config, SignedManifest, VerifiedManifest, MAX_SNAPSHOT_BYTES},
     transport, unix_now, SKIP_ENV,
 };
 
@@ -25,6 +25,38 @@ const SNAPSHOT_FILE: &str = "manifest.bin";
 const HELPER_FILE: &str = "helper.exe";
 #[cfg(windows)]
 const APPLY_ARG: &str = "--apply-launcher-update";
+
+/// The compiled protocol decides how staged metadata authorizes a payload.
+/// A signed build never interprets a legacy snapshot as signed authorization.
+pub(super) trait UpdateVerifier {
+    fn staged_artifact(
+        &self,
+        installation: &Installation,
+        snapshot_path: &Path,
+        cancelled: &AtomicBool,
+    ) -> Result<Artifact>;
+}
+
+impl UpdateVerifier for Config {
+    fn staged_artifact(
+        &self,
+        installation: &Installation,
+        snapshot_path: &Path,
+        cancelled: &AtomicBool,
+    ) -> Result<Artifact> {
+        let signed = read_snapshot(snapshot_path, cancelled)?;
+        let verified = self.verify(&signed, unix_now()?, true)?;
+        if !verified
+            .version
+            .cmp_precedence(&manifest::parse_version(env!("CARGO_PKG_VERSION"))?)
+            .is_gt()
+        {
+            bail!("replacement must be a strictly newer signed launcher");
+        }
+        installation.accept_manifest(self, &verified, cancelled)?;
+        Ok(verified.artifact(manifest::platform_key())?.clone())
+    }
+}
 
 pub(super) struct Installation {
     target: PathBuf,
@@ -163,26 +195,16 @@ impl Installation {
 
     pub(super) fn verify_before_replace(
         &self,
-        config: &Config,
+        config: &impl UpdateVerifier,
         staging: &StagingDir,
         cancelled: &AtomicBool,
     ) -> Result<File> {
         check_cancelled(cancelled)?;
-        let signed = read_snapshot(&staging.snapshot_path(), cancelled)?;
-        let verified = config.verify(&signed, unix_now()?, true)?;
+        let artifact = config.staged_artifact(self, &staging.snapshot_path(), cancelled)?;
         check_cancelled(cancelled)?;
-        if !verified
-            .version
-            .cmp_precedence(&manifest::parse_version(env!("CARGO_PKG_VERSION"))?)
-            .is_gt()
-        {
-            bail!("replacement must be a strictly newer signed launcher");
-        }
-        self.accept_manifest(config, &verified, cancelled)?;
-        let artifact = verified.artifact(manifest::platform_key())?;
         let path = staging.payload_path();
         let mut file = open_regular(&path)?;
-        transport::verify_payload(&mut file, artifact, cancelled)?;
+        transport::verify_payload(&mut file, &artifact, cancelled)?;
         self.target_is_unchanged(cancelled)?;
         ensure_same_file(&file, &path)?;
         check_cancelled(cancelled)?;
@@ -192,7 +214,7 @@ impl Installation {
     #[cfg(not(windows))]
     pub(super) fn replace_and_restart(
         &self,
-        config: &Config,
+        config: &impl UpdateVerifier,
         staging: &mut StagingDir,
         cancelled: &AtomicBool,
     ) -> Result<()> {
@@ -201,13 +223,13 @@ impl Installation {
         Command::new(&self.target)
             .env(SKIP_ENV, "1")
             .spawn()
-            .context("restart signed launcher")?;
+            .context("restart updated launcher")?;
         Ok(())
     }
 
     pub(super) fn promote_verified(
         &self,
-        config: &Config,
+        config: &impl UpdateVerifier,
         staging: &StagingDir,
         cancelled: &AtomicBool,
     ) -> Result<()> {
@@ -219,7 +241,7 @@ impl Installation {
         }
         #[cfg(unix)]
         file.sync_all()?;
-        // 载荷与目标位于同一文件系统；保留已验签文件句柄，私有目录阻止其他用户换包。
+        // 保留已校验文件句柄，私有目录阻止其他用户换包；协议由编译配置确定。
         check_cancelled(cancelled)?;
         move_replace(&staging.payload_path(), &self.target)
             .context("atomically replace launcher")?;
@@ -231,13 +253,13 @@ impl Installation {
     #[cfg(windows)]
     pub(super) fn replace_and_restart(
         &self,
-        config: &Config,
+        config: &impl UpdateVerifier,
         staging: &mut StagingDir,
         cancelled: &AtomicBool,
     ) -> Result<()> {
         use std::os::windows::process::CommandExt;
         use winapi::um::winbase::CREATE_NO_WINDOW;
-        // 最终权限/签名/摘要检查后才启动旧启动器的助手副本。
+        // 最终权限/协议/摘要检查后才启动旧启动器的助手副本。
         let _payload = self.verify_before_replace(config, staging, cancelled)?;
         let helper = staging.path.join(HELPER_FILE);
         let mut current = open_regular(&self.target)?;
@@ -256,7 +278,7 @@ impl Installation {
             .env(super::NO_CONSOLE_ENV, "1")
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
-            .context("start signed launcher update helper")?;
+            .context("start launcher update helper")?;
         staging.keep = true; // 助手仍运行于此目录，助手完成后负责删除。
         Ok(())
     }
@@ -304,8 +326,14 @@ impl StagingDir {
         self.path.join(SNAPSHOT_FILE)
     }
     pub(super) fn write_snapshot(&self, signed: &SignedManifest) -> Result<()> {
+        self.write_metadata(&signed.encode()?)
+    }
+    pub(super) fn write_metadata(&self, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() || bytes.len() > MAX_SNAPSHOT_BYTES {
+            bail!("stored launcher update metadata exceeds its size limit");
+        }
         let mut file = create_new_file(&self.snapshot_path())?;
-        file.write_all(&signed.encode()?)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         Ok(())
     }
@@ -319,16 +347,16 @@ impl Drop for StagingDir {
 }
 
 pub(super) fn read_snapshot(path: &Path, cancelled: &AtomicBool) -> Result<SignedManifest> {
+    SignedManifest::decode(&read_metadata(path, cancelled)?)
+}
+
+pub(super) fn read_metadata(path: &Path, cancelled: &AtomicBool) -> Result<Vec<u8>> {
     check_cancelled(cancelled)?;
     let file = open_regular(path)?;
     if file.metadata()?.len() > MAX_SNAPSHOT_BYTES as u64 {
         bail!("stored launcher update metadata exceeds its size limit");
     }
-    SignedManifest::decode(&transport::read_limited(
-        file,
-        MAX_SNAPSHOT_BYTES,
-        cancelled,
-    )?)
+    transport::read_limited(file, MAX_SNAPSHOT_BYTES, cancelled)
 }
 
 pub(super) fn create_new_file(path: &Path) -> Result<File> {
@@ -676,8 +704,7 @@ fn wide_null(path: &Path) -> std::io::Result<Vec<u16>> {
 
 #[cfg(windows)]
 pub(super) fn try_apply_from_args(
-    config: impl FnOnce() -> Result<Option<Config>>,
-    now: impl FnOnce() -> Result<u64>,
+    config: impl FnOnce() -> Result<super::UpdateConfig>,
 ) -> Result<bool> {
     use std::{ffi::OsStr, os::windows::process::CommandExt, thread, time::Duration};
     use winapi::um::winbase::CREATE_NO_WINDOW;
@@ -689,8 +716,7 @@ pub(super) fn try_apply_from_args(
     if args.next().is_some() {
         bail!("unexpected launcher update helper arguments");
     }
-    let config =
-        config()?.context("launcher update helper is disabled without compiled trust roots")?;
+    let config = config()?;
     // 启动助手是旧进程通过最后一次取消检查后的提交点；助手没有交互式启动界面。
     let cancelled = AtomicBool::new(false);
     let helper = std::env::current_exe()?.canonicalize()?;
@@ -709,22 +735,6 @@ pub(super) fn try_apply_from_args(
     let installation = Installation::for_helper(&target, &helper, &cancelled)?;
     // 参数不能授权任意目标：目标的字节必须与当前正在运行的旧启动器副本完全相同。
     installation.target_is_unchanged(&cancelled)?;
-    let signed = read_snapshot(&source.join(SNAPSHOT_FILE), &cancelled)?;
-    let verified = config.verify(&signed, now()?, true)?;
-    check_cancelled(&cancelled)?;
-    let artifact = verified.artifact(manifest::platform_key())?;
-    let mut input = open_regular(&source.join(PAYLOAD_FILE))?;
-    transport::verify_payload(&mut input, artifact, &cancelled)?;
-    // 即便助手被手动调用，也只从自己新建的受保护目录执行替换。
-    let staging = StagingDir::create(installation.parent())?;
-    staging.write_snapshot(&signed)?;
-    let mut output = create_new_file(&staging.payload_path())?;
-    let copied = std::io::copy(&mut input.take(artifact.size + 1), &mut output)?;
-    if copied != artifact.size {
-        bail!("launcher update helper payload changed while copying");
-    }
-    output.sync_all()?;
-    drop(output);
     let mut lock = None;
     for _ in 0..60 {
         match installation.lock(&cancelled) {
@@ -739,9 +749,25 @@ pub(super) fn try_apply_from_args(
         }
     }
     let _lock = lock.context("timed out waiting for launcher update lock")?;
+    let source_staging = StagingDir {
+        path: source.to_path_buf(),
+        keep: true,
+    };
+    let input = installation.verify_before_replace(&config, &source_staging, &cancelled)?;
+    let size = input.metadata()?.len();
+    // 即便助手被手动调用，也只从自己新建的受保护目录执行替换。
+    let staging = StagingDir::create(installation.parent())?;
+    staging.write_metadata(&read_metadata(&source_staging.snapshot_path(), &cancelled)?)?;
+    let mut output = create_new_file(&staging.payload_path())?;
+    let copied = std::io::copy(&mut input.take(size + 1), &mut output)?;
+    if copied != size {
+        bail!("launcher update helper payload changed while copying");
+    }
+    output.sync_all()?;
+    drop(output);
     let mut last_error = None;
     for _ in 0..60 {
-        // 每次尝试都重新验签/检查有效期/校验文件，受保护目录阻止其他用户换包。
+        // 每次按编译协议重新验证元数据和文件，不接受命令行选择较弱的协议。
         match installation.promote_verified(&config, &staging, &cancelled) {
             Ok(()) => {
                 check_cancelled(&cancelled)?;
@@ -750,7 +776,7 @@ pub(super) fn try_apply_from_args(
                     .env(super::NO_CONSOLE_ENV, "1")
                     .creation_flags(CREATE_NO_WINDOW)
                     .spawn()
-                    .context("restart signed launcher")?;
+                    .context("restart updated launcher")?;
                 // 旧输入与 helper 仍可能被映射，尽力清理并安排下次系统启动删除。
                 let _ = fs::remove_file(source.join(SNAPSHOT_FILE));
                 let _ = fs::remove_file(source.join(PAYLOAD_FILE));

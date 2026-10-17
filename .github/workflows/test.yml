@@ -63,7 +63,7 @@ jobs:
           cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Tests disable self-update unless a public trust root is explicitly configured.
+      # Tests use local fixtures and never contact the production update service.
       - name: Check all targets
         run: cargo check --locked --all-targets
 

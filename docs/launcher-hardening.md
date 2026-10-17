@@ -4,12 +4,12 @@
 
 ## 模块与提交边界
 
-- `update/`：签名清单、逐跳 HTTPS 来源、回退保护、下载与安装复验，配套离线签名工具。
+- `update/`：兼容原 HTTPS 清单与 mTLS 下载，逐跳约束来源、下载和安装复验；独立签名及回退保护由维护者显式选择，配套离线签名工具。
 - `process_security.rs` / `backend.rs`：只回收自有进程边界，HTTP(S) 与监听者归属检查；Windows 后端显式授予模拟器脱离能力，安装命令不授予。
 - `setup/` / `nodejs/`：分离环境准备职责，取消回收安装子树，保护开发配置/锁文件，链接安全清理和用户级 Node 安装。
 - `preferences.rs`：原子保存关闭偏好；Windows/macOS 托盘保留 WebView，原生菜单可修改偏好，网页设置接口遵循统一安全边界。
 - `commands.rs` / `webview_security.rs` / `popup_guard.rs` / `ui/`：命令能力、来源、窗口角色、主框架凭证、弹窗拒绝、CSP 与导出限制。
-- `.github/workflows/package.yml`：签名发布需仓库变量显式启用，缺少信任配置时仍可发布普通安装包；不使用继承的第三方部署秘密。
+- `.github/workflows/package.yml`：保留维护者原有的 tag 构建、R2/CDN 上传、SSH 清单发布和旧版兼容部署，不要求新增签名密钥或迁移发行服务。
 
 完整重构继承了原实现所依赖的启动保护：开发工作区及锁文件保护、HTTPS/IPv6 地址统一、启动取消保留环境、splash 就绪握手和旧 SSE 能力探测。未将个人仓库的 deploy 来源或便携目录后续变更带入本分支。
 
