@@ -21,24 +21,21 @@ cargo check            # 仅检查编译
 ### 构建脚本环境变量（build.rs）
 
 - `ALAS_BOOTSTRAP_UV`：指向要内嵌的 uv 二进制。未设置时用空占位符（本地开发正常，运行时回退到 PATH 中的 uv）。
-- `ALAS_LAUNCHER_MTLS_IDENTITY_PEM_B64`：launcher 自更新的 mTLS 客户端证书（base64 PEM）。未设置时回退读取仓库根目录的 `证书.txt`（不入库）。
-- `LAUNCHER_UPDATE_URL`：覆盖自更新源，默认 `https://ap-launcher-update.nanoda.work/updata/stable.json`。
+- `AZURPILOT_UPDATE_MANIFEST_URL` / `AZURPILOT_UPDATE_PUBLIC_KEY`：签名更新清单 URL 和 Ed25519 公钥，缺一则禁用自身更新。
+- `AZURPILOT_UPDATE_METADATA_ORIGINS` / `AZURPILOT_UPDATE_PAYLOAD_ORIGINS`：分别约束清单和载荷的 HTTPS 来源及每一跳重定向。
+- `AZURPILOT_UPDATE_CHANNEL` / `AZURPILOT_UPDATE_MIN_SEQUENCE`：签名渠道和最小序号。
+
+不嵌入签名私钥或旧 mTLS 身份。配置及发布步骤见 [签名更新](docs/update-security.md)。
 
 Windows 构建的 manifest 使用 `asInvoker`，安装器为当前用户安装；不要求管理员运行。Node.js 使用当前用户的便携安装，不修改系统 PATH 或 ACL。
 
-## 模块职责（src/，行数为 2026-10 实测）
+## 模块职责
 
-| 模块 | 职责 |
-|---|---|
-| `main.rs`（~4600 行） | Tauri 入口：splash/主窗口管理、托盘、时间炸弹、标题栏注入、错误页、Tauri 命令注册 |
-| `setup.rs`（~2600 行） | 环境搭建：Python/uv/adb/git 安装、git 更新（重试 20 次）、`uv sync`、deploy.yaml 迁移 |
-| `backend.rs`（~500 行） | `gui.py` 子进程生命周期、端口占用清理、`ALAS_LAUNCHER_PID` 泄漏防护（Drop 扫描全进程表） |
-| `nodejs.rs`（~1000 行） | **仅 Windows**：检测系统级 Node.js，缺失时下载安装（SHA256 校验） |
-| `notify.rs`（~340 行） | SSE 通知流（`/api/notify_stream`）、平台原生通知 |
-| `launcher_control.rs`（~160 行） | 反向控制流（`/api/launcher/stream`）：后端下发的退出/重启/开机自启指令 |
-| `autostart.rs`（~100 行） | 开机自启状态查询/设置（Windows 写注册表 Run 键，带 `--start-minimized`） |
-| `i18n.rs`（~70 行） | locale 检测：`--lang` 参数 > 系统 locale > 回退 `en` |
-| `window_util.rs` | Windows `CREATE_NO_WINDOW` trait，子进程禁止弹控制台 |
+`main.rs` 负责应用装配与窗口生命周期。`update/`、`commands.rs`、`ui/`、`webview_security.rs`、`popup_guard.rs`、`process_security.rs` 分别维护签名更新、原生命令、界面、网页权限、弹窗控制和进程归属；`setup/` 与 `nodejs/` 拆分环境准备和便携安装。边界与验证入口见 [安全重构](docs/launcher-hardening.md)。
+
+- 新增原生命令同时更新 build.rs AppManifest、WebviewPolicy 角色矩阵、bridge 和测试，不授予网页默认 core/plugin 权限。
+- 端口占用只报错；仅结束本次持有 Job/session 的进程，不按端口、名称或环境变量杀其他程序。Windows 后端保留模拟器显式脱离协议，普通安装命令不获得该能力。
+- 开发检出和 `--skip-update` 保留配置与锁文件，依赖使用冻结锁；取消启动保留已有环境。
 
 ## 必须遵守的约定
 

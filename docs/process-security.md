@@ -17,7 +17,7 @@ macOS 从固定系统路径调用 `lsof -Fptn`，按 IPv4/IPv6 地址族、监�
 
 启动前对配置监听地址执行原生 `bind` 预检，短暂占用最多等待 300ms（包含并发 fork 在 exec 前继承的 CLOEXEC socket），持续冲突会返回本地化错误，保留原占用者。主机名先经过严格的 IP/DNS 校验，拒绝凭据、路径、查询、分片、端口注入；保留明确的 HTTPS 和 IPv6 配置。
 
-预检与 spawn 之间的竞争通过监听者归属检查处理：HTTP 请求之前和成功响应之后都必须证明监听者属于本次边界，同时确认组长尚未退出。Linux 从 `/proc/net/tcp{,6}` 的监听 socket inode 与本组 fd 对照；Windows 从原生 TCP 所有者表取得 PID，再打开进程句柄调用 `IsProcessInJob`；macOS 使用固定系统路径 `/usr/sbin/lsof` 只读查询，并核对独立 session/进程组。macOS 查询同一端口的所有地址，可能保守地拒绝另一网卡上同号端口的无关监听者。无法验证归属会使启动失败，不会转换成终止权限。
+预检与 spawn 之间的竞争通过监听者归属检查处理：HTTP 请求之前和成功响应之后都必须证明监听者属于本次边界，同时确认组长尚未退出。Linux 从 `/proc/net/tcp{,6}` 的监听 socket inode 与本组 fd 对照；Windows 从原生 TCP 所有者表取得 PID，再打开进程句柄调用 `IsProcessInJob`；macOS 使用固定系统路径 `/usr/sbin/lsof` 只读查询，并核对独立 session/进程组。macOS 按配置地址筛选查询结果。无法验证归属会使启动失败，不会转换成终止权限。
 
 HTTP 前后快照可以阻止普通并发程序抢占端口被当成后端。它不是针对同一用户恶意进程的加密证明：要抵抗精确安排在两次快照之间的恶意换主，应由后端提供每次启动的 challenge-response，或接收启动器预先绑定并传入的 socket。启动器不向未知 HTTP 服务发送信任密钥来充当身份检查。TLS 始终校验证书链/主机名，并只额外信任用户明确配置的证书。
 
@@ -25,9 +25,9 @@ setup 的长命令与状态命令复用同一进程边界：取消、可展开�
 
 运行时清理与后端恢复都先用 `symlink_metadata` 识别符号链接/Windows reparse point，只删除链接本身，不遍历或 chmod 外部目标。恢复流程还拒绝将链接作为 `.venv` 根目录。Unix 清只读仅追加所有者写位 `0o200`，不开放组或其他用户写位。路径检查不构成对同一用户恶意并发替换目录的文件系统沙箱；目录仍应归当前普通用户管理。
 
-## 用户级 Node.js
-
 超时恢复入口在 `preserve_workspace` 为真时直接拒绝执行，早于运行目录查找和 `.venv` 删除；开发检出与 `--skip-update` 不会因自动恢复重建已有环境。
+
+## 用户级 Node.js
 
 缺失与过旧都安装官方便携 zip，路径为 `%LOCALAPPDATA%\AzurPilotLauncher\nodejs\v<version>-win-<arch>`。来源与 SHA-256 在 `src/nodejs/source.rs` 中固定；只允许 `https://nodejs.org`，不跟随重定向，下载流式计算摘要后再从磁盘复验。URL、版本解析和文件事务与 Windows 编排分开，纯逻辑可在三平台测试。
 
