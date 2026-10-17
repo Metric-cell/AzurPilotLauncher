@@ -87,6 +87,140 @@ fn address_matches(address: IpAddr, configured: &[IpAddr]) -> bool {
     })
 }
 
+/// lsof 的机器字段按进程/文件分组；不能跳过未知或不完整的记录。
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_listeners(
+    contents: &str,
+    port: u16,
+    addresses: &[IpAddr],
+) -> io::Result<BTreeSet<u32>> {
+    let malformed = || io::Error::other("invalid lsof TCP listener record");
+    let mut pids = BTreeSet::new();
+    let mut pid = None;
+    let mut family = None;
+    let mut process_has_listener = false;
+    let mut pending_file = false;
+    for line in contents.lines() {
+        let (field, value) = line.split_at_checked(1).ok_or_else(malformed)?;
+        match field {
+            "p" => {
+                if family.is_some() || pending_file || pid.is_some() && !process_has_listener {
+                    return Err(malformed());
+                }
+                let parsed = value.parse::<u32>().map_err(|_| malformed())?;
+                if parsed == 0 {
+                    return Err(malformed());
+                }
+                pid = Some(parsed);
+                process_has_listener = false;
+            }
+            // lsof 可附带文件描述符字段，文件类型/名称仍必须完整。
+            "f" if pid.is_some() && family.is_none() && !pending_file && !value.is_empty() => {
+                pending_file = true;
+            }
+            "t" if pid.is_some() && family.is_none() => {
+                family = Some(match value {
+                    "IPv4" => false,
+                    "IPv6" => true,
+                    _ => return Err(malformed()),
+                });
+                pending_file = true;
+            }
+            "n" => {
+                let ipv6 = family.take().ok_or_else(malformed)?;
+                let (host, listener_port) = value.rsplit_once(':').ok_or_else(malformed)?;
+                let listener_port = listener_port.parse::<u16>().map_err(|_| malformed())?;
+                if listener_port != port || port == 0 {
+                    return Err(malformed());
+                }
+                let address: IpAddr = if host == "*" {
+                    if ipv6 { "::" } else { "0.0.0.0" }
+                        .parse()
+                        .map_err(|_| malformed())?
+                } else {
+                    let host = host
+                        .strip_prefix('[')
+                        .and_then(|host| host.strip_suffix(']'))
+                        .unwrap_or(host);
+                    host.parse().map_err(|_| malformed())?
+                };
+                if address.is_ipv6() != ipv6 {
+                    return Err(malformed());
+                }
+                if address_matches(address, addresses) {
+                    pids.insert(pid.ok_or_else(malformed)?);
+                }
+                process_has_listener = true;
+                pending_file = false;
+            }
+            _ => return Err(malformed()),
+        }
+    }
+    if family.is_some() || pending_file || pid.is_some() && !process_has_listener {
+        return Err(malformed());
+    }
+    Ok(pids)
+}
+
+#[cfg(test)]
+mod macos_listener_tests {
+    use super::*;
+
+    fn parse(contents: &str, configured: &str) -> io::Result<BTreeSet<u32>> {
+        parse_macos_listeners(contents, 22267, &[configured.parse().unwrap()])
+    }
+
+    #[test]
+    fn ipv4_listeners_filter_unrelated_interfaces_and_collect_multiple_owners() {
+        let records = "p11\nf3\ntIPv4\nn127.0.0.1:22267\np12\ntIPv4\nn192.0.2.5:22267\np13\ntIPv4\nn127.0.0.1:22267\n";
+        assert_eq!(
+            parse(records, "127.0.0.1").unwrap(),
+            BTreeSet::from([11, 13])
+        );
+        assert_eq!(
+            parse(records, "0.0.0.0").unwrap(),
+            BTreeSet::from([11, 12, 13])
+        );
+        assert!(parse("p12\ntIPv4\nn192.0.2.5:22267\n", "127.0.0.1")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn ipv6_and_wildcards_use_the_declared_address_family() {
+        let records = "p21\ntIPv6\nn[::1]:22267\ntIPv6\nn[2001:db8::1]:22267\np22\ntIPv6\nn*:22267\np23\ntIPv4\nn*:22267\n";
+        assert_eq!(parse(records, "::1").unwrap(), BTreeSet::from([21, 22]));
+        assert_eq!(parse(records, "127.0.0.1").unwrap(), BTreeSet::from([23]));
+        assert_eq!(parse(records, "::").unwrap(), BTreeSet::from([21, 22]));
+        assert!(parse("", "127.0.0.1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn malformed_or_unknown_records_fail_closed_even_on_other_interfaces() {
+        for record in [
+            "\n",
+            "p0\n",
+            "pfoo\n",
+            "p1\n",
+            "p1\nf3\n",
+            "p1\ntIPv4\n",
+            "tIPv4\nn127.0.0.1:22267\n",
+            "p1\nn127.0.0.1:22267\n",
+            "p1\ntother\nn192.0.2.5:22267\n",
+            "p1\ntIPv4\nnnot-an-ip:22267\n",
+            "p1\ntIPv4\nn192.0.2.5:garbage\n",
+            "p1\ntIPv4\nn192.0.2.5:80\n",
+            "p1\ntIPv6\nn192.0.2.5:22267\n",
+            "p1\ntIPv4\nn[::1]:22267\n",
+            "p1\ntIPv4\nn192.0.2.5:22267\nxunknown\n",
+            "p1\ntIPv4\np2\ntIPv4\nn127.0.0.1:22267\n",
+            "p1\ntIPv4\nn192.0.2.5:22267\np2\n",
+        ] {
+            assert!(parse(record, "127.0.0.1").is_err(), "{record:?}");
+        }
+    }
+}
+
 #[cfg(unix)]
 mod platform {
     use super::*;
@@ -319,22 +453,21 @@ mod platform {
     pub(super) fn listener_state(
         group: &mut OwnedProcessGroup,
         port: u16,
-        _addresses: &[IpAddr],
+        addresses: &[IpAddr],
     ) -> io::Result<ListenerState> {
         use crate::window_util::CreateNoWindow as _;
         try_wait(group)?;
         // macOS 自带 lsof；固定系统路径，环境不参与可执行文件解析。
         let output = Command::new("/usr/sbin/lsof")
-            .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+            .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fptn"])
             .create_no_window()
             .output()?;
         if !output.status.success() && (!output.stdout.is_empty() || !output.stderr.is_empty()) {
             return Err(io::Error::other("unable to inspect backend port ownership"));
         }
-        let pids: BTreeSet<u32> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.trim().parse().ok())
-            .collect();
+        let contents = std::str::from_utf8(&output.stdout)
+            .map_err(|_| io::Error::other("invalid lsof output encoding"))?;
+        let pids = parse_macos_listeners(contents, port, addresses)?;
         Ok(if pids.is_empty() {
             ListenerState::Pending
         } else if pids.into_iter().all(|pid| owns_pid(group, pid)) {

@@ -13,6 +13,8 @@ Unix 保证范围是受管进程组：正常 Python worker 继承该组。主动
 
 ## 端口与就绪
 
+macOS 从固定系统路径调用 `lsof -Fptn`，按 IPv4/IPv6 地址族、监听地址和端口筛选后再核对进程归属；其他接口上相同端口的服务不触发冲突。未知或不完整的机器字段返回错误，不据此放行。解析器可在 Linux 运行单元测试，系统 `lsof` 与 session 归属仍需 macOS 实测。
+
 启动前对配置监听地址执行原生 `bind` 预检，短暂占用最多等待 300ms（包含并发 fork 在 exec 前继承的 CLOEXEC socket），持续冲突会返回本地化错误，保留原占用者。主机名先经过严格的 IP/DNS 校验，拒绝凭据、路径、查询、分片、端口注入；保留明确的 HTTPS 和 IPv6 配置。
 
 预检与 spawn 之间的竞争通过监听者归属检查处理：HTTP 请求之前和成功响应之后都必须证明监听者属于本次边界，同时确认组长尚未退出。Linux 从 `/proc/net/tcp{,6}` 的监听 socket inode 与本组 fd 对照；Windows 从原生 TCP 所有者表取得 PID，再打开进程句柄调用 `IsProcessInJob`；macOS 使用固定系统路径 `/usr/sbin/lsof` 只读查询，并核对独立 session/进程组。macOS 查询同一端口的所有地址，可能保守地拒绝另一网卡上同号端口的无关监听者。无法验证归属会使启动失败，不会转换成终止权限。
