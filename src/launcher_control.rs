@@ -1,12 +1,12 @@
 //! 反向控制流模块：接收 WebUI 后端经 SSE 下发的启动器控制指令并回报结果。
 //!
-//! 后端通过 `http://127.0.0.1:{port}/api/launcher/stream` 推送指令
+//! 旧版后端通过配置的 HTTP/HTTPS 地址下 `/api/launcher/stream` 推送指令
 //! （查询/设置开机自启等），本模块在独立线程中维持长连接、解析 SSE 事件、
 //! 执行指令并把执行结果 POST 回 `/api/launcher/report`，形成命令-应答闭环。
 //! `allow_exit` 标志用于在启动器关闭流程中优雅终止此线程。
 
 use std::{
-    io::{BufRead, BufReader},
+    io::BufReader,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -15,14 +15,18 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
-use crate::autostart;
+use crate::{
+    autostart,
+    backend::WebuiLaunchConfig,
+    sse::{self, StreamOutcome},
+};
 
 /// 后端下发的单条启动器控制指令。
 ///
@@ -41,17 +45,32 @@ struct LauncherCommand {
 /// 线程内部带 3 秒间隔的自动重连：连接异常断开时只要启动器尚未进入
 /// 退出流程（`allow_exit` 为 false）就会重新连接，保证指令通道可用。
 /// `allow_exit` 由启动器的退出流程置位，用于让此线程尽快结束。
-pub fn start_launcher_control_stream(port: u16, allow_exit: Arc<AtomicBool>) {
+pub fn start_launcher_control_stream(config: WebuiLaunchConfig, allow_exit: Arc<AtomicBool>) {
     thread::spawn(move || {
-        let stream_url = format!("http://127.0.0.1:{port}/api/launcher/stream");
-        let report_url = format!("http://127.0.0.1:{port}/api/launcher/report");
+        let base = match config.backend_url() {
+            Ok(base) => base,
+            Err(e) => {
+                warn!("Invalid launcher control configuration: {e}");
+                return;
+            }
+        };
+        if !crate::webview_security::is_loopback_http_origin(&match tauri::Url::parse(&base) {
+            Ok(url) => url,
+            Err(_) => return,
+        }) {
+            info!("Native launcher control is disabled for non-loopback backends");
+            return;
+        }
+        let stream_url = format!("{base}api/launcher/stream");
+        let report_url = format!("{base}api/launcher/report");
         // 显式禁用系统代理并限制连接超时：控制流是本机回环通信，
         // 走代理既无意义，还可能因系统代理故障而中断
-        let client = match Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .no_proxy()
-            .build()
-        {
+        let client = match config.http_client_builder().and_then(|builder| {
+            Ok(builder
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(30))
+                .build()?)
+        }) {
             Ok(client) => client,
             Err(e) => {
                 warn!("Unable to create launcher control client: {e}");
@@ -62,13 +81,17 @@ pub fn start_launcher_control_stream(port: u16, allow_exit: Arc<AtomicBool>) {
         while !allow_exit.load(Ordering::SeqCst) {
             info!("Connecting to launcher control stream: {stream_url}");
             match read_launcher_control_stream(&client, &stream_url, &report_url, &allow_exit) {
-                Ok(()) => debug!("Launcher control stream ended"),
+                Ok(StreamOutcome::Ended) => debug!("Launcher control stream ended"),
+                Ok(StreamOutcome::Unsupported) => {
+                    info!("Backend does not provide the legacy launcher control stream; subscription stopped");
+                    return;
+                }
                 Err(e) => warn!("Launcher control stream disconnected: {e}"),
             }
 
             // 断开后稍作退避再重连；启动器已进入退出流程时立即结束循环
             if !allow_exit.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_secs(3));
+                sse::wait_to_reconnect(&allow_exit);
             }
         }
     });
@@ -88,59 +111,30 @@ fn read_launcher_control_stream(
     stream_url: &str,
     report_url: &str,
     allow_exit: &AtomicBool,
-) -> Result<()> {
+) -> Result<StreamOutcome> {
     let response = client
         .get(stream_url)
         .header(ACCEPT, "text/event-stream")
         .send()?;
 
-    if !response.status().is_success() {
-        return Err(anyhow!("server returned {}", response.status()));
+    if !sse::is_event_stream(&response)? {
+        return Ok(StreamOutcome::Unsupported);
     }
 
-    let mut reader = BufReader::new(response);
-    let mut data_lines = Vec::new();
-
-    while !allow_exit.load(Ordering::SeqCst) {
-        let mut line = String::new();
-        let bytes = reader.read_line(&mut line)?;
-        if bytes == 0 {
-            break;
-        }
-
-        let line = line.trim_end_matches(['\r', '\n']);
-        // SSE 协议：空行标志一个事件的边界，把此前累积的 data 行整体分发
-        if line.is_empty() {
-            dispatch_sse_data(&mut data_lines, client, report_url);
-            continue;
-        }
-
-        if let Some(data) = line.strip_prefix("data:") {
-            data_lines.push(data.trim_start().to_owned());
+    let mut reader = sse::EventReader::new(BufReader::new(response));
+    while let Some(data) = reader.next(allow_exit)? {
+        match serde_json::from_str::<LauncherCommand>(&data) {
+            Ok(command) if command.id.len() <= 256 && command.command_type.len() <= 64 => {
+                if allow_exit.load(Ordering::SeqCst) {
+                    break;
+                }
+                handle_command(client, report_url, command);
+            }
+            Ok(_) => warn!("Ignoring launcher command with oversized fields"),
+            Err(e) => warn!("Ignoring invalid launcher command: {e}"),
         }
     }
-
-    // 流结束时若仍有未分发的残留事件（缺空行结尾），补一次分发避免丢失
-    dispatch_sse_data(&mut data_lines, client, report_url);
-    Ok(())
-}
-
-/// 把累积的一批 SSE data 行合并为完整事件并交给指令处理器。
-///
-/// 多行 data 按 SSE 规范用换行符拼接；非 JSON 格式的事件只记录
-/// 警告并丢弃，不中断连接。
-fn dispatch_sse_data(data_lines: &mut Vec<String>, client: &Client, report_url: &str) {
-    if data_lines.is_empty() {
-        return;
-    }
-
-    let data = data_lines.join("\n");
-    data_lines.clear();
-
-    match serde_json::from_str::<LauncherCommand>(&data) {
-        Ok(command) => handle_command(client, report_url, command),
-        Err(e) => warn!("Ignoring invalid launcher command: {e}; payload={data}"),
-    }
+    Ok(StreamOutcome::Ended)
 }
 
 /// 执行单条控制指令，并把执行结果回报给后端。
@@ -174,9 +168,11 @@ fn handle_command(client: &Client, report_url: &str, command: LauncherCommand) {
 
     if let Err(e) = client
         .post(report_url)
+        .timeout(Duration::from_secs(5))
         .header(CONTENT_TYPE, "application/json")
         .body(report.to_string())
         .send()
+        .and_then(|response| response.error_for_status())
     {
         warn!("Failed to report launcher command result: {e}");
     }

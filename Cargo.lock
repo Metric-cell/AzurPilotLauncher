@@ -38,6 +38,7 @@ dependencies = [
  "ed25519-dalek",
  "nix",
  "notify-rust",
+ "objc2 0.6.1",
  "openssl-probe",
  "rand 0.8.5",
  "reqwest",
@@ -60,6 +61,8 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "webkit2gtk",
+ "webview2-com",
  "winapi",
  "windows-registry",
 ]

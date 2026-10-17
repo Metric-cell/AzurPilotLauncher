@@ -1,8 +1,7 @@
 ;
-        if (window.top !== window) return;
+        if (window.top !== window || !window.__ALAS_NATIVE__) return;
         const invoke =
-            (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
-            || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
+            (window.__ALAS_NATIVE__ && window.__ALAS_NATIVE__.invoke);
         if (typeof invoke !== 'function') {
             return;
         }

@@ -47,9 +47,9 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Test close prompt and preferences bridge (Linux only)
+      - name: Test close prompt and native bridge (Linux only)
         if: runner.os == 'Linux'
-        run: node --test scripts/test-close-prompt.cjs scripts/test-preferences-bridge.cjs
+        run: node --test scripts/test-close-prompt.cjs scripts/test-webview-bridge.cjs
 
       - name: Install stable Rust
         run: |
@@ -63,11 +63,13 @@ jobs:
           cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Tests use build.rs placeholders for uv and mTLS; no release secrets needed.
+      # Tests disable self-update unless a public trust root is explicitly configured.
       - name: Check all targets
         run: cargo check --locked --all-targets
 
-      # GitHub-hosted Windows runners run as administrators, as required by
-      # the launcher manifest and protected Node.js installer directory tests.
       - name: Run tests
         run: cargo test --locked --all-targets
+
+      - name: Verify signed release tooling (Linux)
+        if: runner.os == 'Linux'
+        run: python3 scripts/test-sign-launcher-update.py

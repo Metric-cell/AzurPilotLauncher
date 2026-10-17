@@ -1,0 +1,370 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  @font-face {{
+    font-family: "MiSans";
+    src: url(data:font/ttf;base64,{mi_sans_font_b64}) format("truetype");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+  }}
+  :root {{
+    color-scheme: light;
+    --bg: #f4f6f8;
+    --surface: #ffffff;
+    --surface-soft: #f8fafb;
+    --line: #e5e9ee;
+    --text: #17212b;
+    --muted: #687582;
+    --accent: #176b67;
+    --accent-hover: #105854;
+    --accent-soft: #e8f4f2;
+    --danger: #b64545;
+    --danger-soft: #fff1f0;
+  }}
+  * {{
+    box-sizing: border-box;
+  }}
+  html, body {{
+    width: 100%;
+    min-height: 100%;
+    margin: 0;
+    font-family: "MiSans", sans-serif;
+    font-weight: 420;
+    font-synthesis: none;
+    color: var(--text);
+    background: #dfe7ea;
+  }}
+  body {{
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 72px 44px 44px;
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    background: transparent;
+    animation: page-in 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }}
+  .error-background-video {{
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    opacity: 0.9;
+    pointer-events: none;
+  }}
+  .error-background-scrim {{
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    background: rgba(244, 247, 248, 0.36);
+    pointer-events: none;
+  }}
+  .panel {{
+    position: relative;
+    z-index: 2;
+    display: grid;
+    grid-template-columns: 190px minmax(0, 1fr);
+    width: min(820px, 100%);
+    min-height: 390px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.76);
+    backdrop-filter: blur(22px) saturate(1.08);
+    box-shadow: 0 20px 48px rgba(23, 33, 43, 0.11), 0 2px 6px rgba(23, 33, 43, 0.04);
+    animation: panel-in 520ms cubic-bezier(0.22, 1, 0.36, 1) 70ms both;
+  }}
+  .signal {{
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--accent);
+    color: #fff;
+  }}
+  .signal::before, .signal::after {{
+    content: "";
+    position: absolute;
+    border: 1px solid rgba(255, 255, 255, 0.17);
+    border-radius: 50%;
+    opacity: 0;
+    animation: signal-expand 3.2s ease-out infinite;
+  }}
+  .signal::before {{ width: 76px; height: 76px; }}
+  .signal::after {{ width: 76px; height: 76px; animation-delay: 1.6s; }}
+  .signal-core {{
+    position: relative;
+    z-index: 1;
+    width: 76px;
+    height: 76px;
+    display: grid;
+    place-items: center;
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.12);
+    animation: core-breathe 2.8s ease-in-out infinite;
+  }}
+  .signal-core svg {{
+    width: 36px;
+    height: 36px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.7;
+  }}
+  .content {{
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: 38px 42px 32px;
+    animation: content-in 500ms cubic-bezier(0.22, 1, 0.36, 1) 140ms both;
+  }}
+  .eyebrow {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 620;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+  }}
+  .eyebrow::before {{
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--danger);
+    box-shadow: 0 0 0 4px var(--danger-soft);
+    animation: status-pulse 2s ease-in-out infinite;
+  }}
+  h1 {{
+    max-width: 470px;
+    margin: 16px 0 0;
+    font-size: 30px;
+    font-weight: 680;
+    letter-spacing: -0.3px;
+    line-height: 1.18;
+  }}
+  .lead {{
+    max-width: 510px;
+    margin: 12px 0 0;
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 430;
+    line-height: 1.65;
+  }}
+  .details {{
+    margin: 24px 0 0;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--surface-soft);
+  }}
+  .row {{
+    display: grid;
+    grid-template-columns: 70px minmax(0, 1fr);
+    gap: 14px;
+    padding: 10px 13px;
+    border-top: 1px solid var(--line);
+    font-size: 12px;
+    font-weight: 460;
+    line-height: 1.5;
+  }}
+  .row:first-child {{ border-top: 0; }}
+  .label {{ color: var(--muted); }}
+  .value {{
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--text);
+    font-family: inherit;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }}
+  .actions {{
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex-wrap: wrap;
+    margin-top: auto;
+    padding-top: 24px;
+  }}
+  button {{
+    min-height: 36px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    padding: 0 13px;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 140ms ease, border-color 140ms ease, color 140ms ease, opacity 140ms ease;
+    will-change: transform;
+  }}
+  button:hover {{ transform: translateY(-1px); }}
+  button:active {{ transform: translateY(0); }}
+  .action-button {{
+    color: #fff;
+    background: var(--accent);
+  }}
+  .action-button:hover {{ background: var(--accent-hover); }}
+  .secondary-button {{
+    color: var(--accent);
+    border-color: #c5dfdc;
+    background: var(--accent-soft);
+  }}
+  .secondary-button:hover {{ background: #dcefeb; border-color: #a8d2cd; }}
+  button:disabled {{ cursor: default; opacity: 0.55; }}
+  button:disabled:hover {{ transform: none; }}
+  .status {{
+    flex: 1 1 100%;
+    min-height: 18px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 460;
+  }}
+  .footer {{
+    margin-top: 16px;
+    color: #9aa5ae;
+    font-size: 11px;
+    font-weight: 430;
+  }}
+  @media (max-width: 680px) {{
+    body {{ padding: 62px 18px 24px; align-items: flex-start; }}
+    .panel {{ grid-template-columns: 1fr; min-height: 0; }}
+    .signal {{ min-height: 120px; }}
+    .signal::before {{ width: 76px; height: 76px; }}
+    .signal::after {{ width: 76px; height: 76px; }}
+    .content {{ padding: 28px 24px 24px; }}
+    h1 {{ font-size: 25px; }}
+    .actions {{ margin-top: 22px; }}
+    button {{ flex: 1 1 auto; }}
+  }}
+  @media (max-width: 420px) {{
+    .row {{ grid-template-columns: 1fr; gap: 3px; }}
+    button {{ width: 100%; }}
+  }}
+  @keyframes page-in {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
+  @keyframes panel-in {{ from {{ opacity: 0; transform: translateY(12px) scale(0.985); }} to {{ opacity: 1; transform: translateY(0) scale(1); }} }}
+  @keyframes content-in {{ from {{ opacity: 0; transform: translateX(10px); }} to {{ opacity: 1; transform: translateX(0); }} }}
+  @keyframes signal-expand {{ 0% {{ opacity: 0.72; transform: scale(0.72); }} 68% {{ opacity: 0.12; }} 100% {{ opacity: 0; transform: scale(2.8); }} }}
+  @keyframes core-breathe {{ 0%, 100% {{ transform: scale(1); }} 50% {{ transform: scale(1.045); }} }}
+  @keyframes status-pulse {{ 0%, 100% {{ opacity: 0.62; }} 50% {{ opacity: 1; }} }}
+  @media (prefers-reduced-motion: reduce) {{
+    *, *::before, *::after {{ animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }}
+  }}
+</style>
+</head>
+<body>
+  <video class="error-background-video" autoplay muted loop playsinline preload="auto" aria-hidden="true">
+    <source src="data:video/mp4;base64,{splash_video_b64}" type="video/mp4">
+  </video>
+  <div class="error-background-scrim" aria-hidden="true"></div>
+  <main class="panel">
+    <div class="signal" aria-hidden="true">
+      <div class="signal-core">
+        <svg viewBox="0 0 24 24"><path d="M12 8v4m0 4h.01"/><path d="M10.3 3.9 2.8 17a2 2 0 0 0 1.7 3h15a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+      </div>
+    </div>
+    <div class="content">
+      <div class="eyebrow">{error_label}</div>
+      <h1>{heading}</h1>
+      <p class="lead">{description}</p>
+      <section class="details" aria-label="{connection_info}">
+        <div class="row">
+          <div class="label">{address}</div>
+          <div id="backend-url" class="value"></div>
+        </div>
+        <div class="row">
+          <div class="label">{error_label}</div>
+          <div id="error-detail" class="value"></div>
+        </div>
+      </section>
+      <div class="actions">
+        <button id="retry-button" class="action-button" type="button">{retry}</button>
+        <button id="gui-log-button" class="secondary-button" type="button">{download_gui_log}</button>
+        <button id="launcher-log-button" class="secondary-button" type="button">{download_launcher_log}</button>
+        <span id="retry-status" class="status"></span>
+      </div>
+      <div class="footer">AzurPilot · {connection_info}</div>
+    </div>
+  </main>
+  <script>
+    (function () {{
+{titlebar_script}
+    }})();
+
+    const i18n = {i18n_json};
+    const backendUrl = {backend_url_json};
+    const errorDetail = {error_detail_json};
+    const retryButton = document.getElementById('retry-button');
+    const guiLogButton = document.getElementById('gui-log-button');
+    const launcherLogButton = document.getElementById('launcher-log-button');
+    const retryStatus = document.getElementById('retry-status');
+    const invoke =
+      (window.__ALAS_NATIVE__ && window.__ALAS_NATIVE__.invoke);
+
+    document.getElementById('backend-url').textContent = backendUrl;
+    document.getElementById('error-detail').textContent = errorDetail;
+
+    retryButton.addEventListener('click', async () => {{
+      retryButton.disabled = true;
+      retryStatus.textContent = i18n.reconnecting;
+      try {{
+        if (typeof invoke !== 'function') {{
+          throw new Error('Tauri invoke is unavailable');
+        }}
+        const connected = await invoke('retry_backend_connection');
+        if (!connected) {{
+          retryStatus.textContent = i18n.stillFailed;
+          retryButton.disabled = false;
+        }}
+      }} catch (error) {{
+        retryStatus.textContent = i18n.retryFailed + (error && error.message ? error.message : error);
+        retryButton.disabled = false;
+      }}
+    }});
+
+    async function downloadLog(button, command, label) {{
+      button.disabled = true;
+      retryStatus.textContent = i18n.preparing.replace('%{{label}}', label);
+      try {{
+        if (typeof invoke !== 'function') {{
+          throw new Error('Tauri invoke is unavailable');
+        }}
+        const filename = await invoke(command);
+        retryStatus.textContent = i18n.saved.replace('%{{filename}}', filename);
+      }} catch (error) {{
+        retryStatus.textContent = i18n.downloadFailed.replace('%{{label}}', label) + (error && error.message ? error.message : error);
+      }} finally {{
+        button.disabled = false;
+      }}
+    }}
+
+    guiLogButton.addEventListener('click', () => {{
+      downloadLog(guiLogButton, 'download_today_gui_log', '{gui_log_label}');
+    }});
+
+    launcherLogButton.addEventListener('click', () => {{
+      downloadLog(launcherLogButton, 'download_today_launcher_log', '{launcher_log_label}');
+    }});
+
+    // 每秒尝试自动刷新（重试连接）
+    setInterval(() => {{
+      if (!retryButton.disabled) {{
+        retryButton.click();
+      }}
+    }}, 1000);
+  </script>
+</body>
+</html>

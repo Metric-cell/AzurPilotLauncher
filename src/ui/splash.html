@@ -1,0 +1,728 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  @font-face {
+    font-family: "MiSans";
+    src: url(data:font/ttf;base64,$MI_SANS_FONT) format("truetype");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+  }
+  :root {
+    --primary-color: #4facfe;
+    --secondary-color: #00f2fe;
+    --text-main: #ffffff;
+    --text-sub: rgba(255, 255, 255, 0.76);
+    --text-muted: rgba(255, 255, 255, 0.52);
+    --surface-soft: rgba(255, 255, 255, 0.16);
+    --surface-border: rgba(255, 255, 255, 0.15);
+    --danger: #ff5f57;
+    --warning: #ffbd2e;
+  }
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+  }
+  html,
+  body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #111827;
+  }
+  body {
+    font-family: "MiSans", sans-serif;
+    font-weight: 420;
+    font-synthesis: none;
+    color: var(--text-main);
+  }
+  button {
+    font: inherit;
+  }
+  .launcher-window {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    border-radius: 0;
+    background: #111827;
+    box-shadow: none;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .splash-background-video {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    pointer-events: none;
+  }
+  .launcher-window::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    background:
+      linear-gradient(to bottom, rgba(0, 0, 0, 0.05) 0%, rgba(0, 0, 0, 0.03) 42%, rgba(0, 0, 0, 0.28) 100%),
+      linear-gradient(115deg, rgba(12, 30, 72, 0.10), rgba(255, 126, 117, 0.05));
+    pointer-events: none;
+  }
+  .top-bar {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    min-height: 56px;
+    padding: 10px 18px;
+    touch-action: none;
+    app-region: drag;
+    -webkit-app-region: drag;
+  }
+  .brand-zone {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    gap: 10px;
+  }
+  .app-title {
+    color: var(--text-main);
+    font-size: 18px;
+    font-weight: 610;
+    letter-spacing: 0;
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.22);
+  }
+  .app-version {
+    color: var(--text-sub);
+    font-size: 12px;
+    font-weight: 460;
+    line-height: 1;
+    background: rgba(255, 255, 255, 0.14);
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    padding: 4px 9px;
+    border-radius: 999px;
+    backdrop-filter: blur(8px);
+  }
+  .top-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .status-badge {
+    max-width: 260px;
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    border-radius: 999px;
+    padding: 6px 13px;
+    color: #394451;
+    background: rgba(250, 250, 247, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(16px) saturate(1.2);
+    box-shadow: 0 4px 14px rgba(61, 79, 97, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.36);
+    font-size: 12px;
+    font-weight: 460;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .status-badge::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--secondary-color);
+    box-shadow: 0 0 12px rgba(0, 242, 254, 0.7);
+    flex: 0 0 auto;
+  }
+  .window-controls {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-height: 36px;
+    padding: 3px 4px;
+    border: 1px solid rgba(255, 255, 255, 0.92);
+    border-radius: 18px;
+    background: rgba(250, 250, 247, 0.78);
+    box-shadow: 0 4px 14px rgba(61, 79, 97, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.36);
+    backdrop-filter: blur(16px) saturate(1.2);
+    flex: 0 0 auto;
+    app-region: no-drag;
+    -webkit-app-region: no-drag;
+  }
+  .window-controls * {
+    app-region: no-drag;
+    -webkit-app-region: no-drag;
+  }
+  .win-btn {
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    color: #727b86;
+    background: transparent;
+    transition: transform 140ms cubic-bezier(.23, 1, .32, 1), background-color 140ms ease, color 140ms ease;
+  }
+  .win-btn:hover {
+    color: #202832;
+    background: rgba(255, 255, 255, 0.72);
+  }
+  .win-btn:active {
+    transform: scale(0.96);
+  }
+  .win-btn svg {
+    width: 11px;
+    height: 11px;
+    stroke: currentColor;
+    stroke-width: 1.35;
+    stroke-linecap: round;
+    opacity: 1;
+  }
+  .win-btn.minimize {
+    color: #727b86;
+  }
+  .win-btn.close {
+    color: #e64f58;
+  }
+  .win-btn.close:hover {
+    color: #b5202e;
+    background: rgba(244, 91, 91, 0.15);
+  }
+  .main-content {
+    position: relative;
+    z-index: 2;
+    padding: 0 40px 35px;
+  }
+  .update-status {
+    margin-bottom: 25px;
+    max-width: min(650px, 100%);
+  }
+  .title-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .spinner {
+    width: 22px;
+    height: 22px;
+    border: 2.5px solid rgba(255, 255, 255, 0.24);
+    border-top-color: var(--text-main);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+    flex: 0 0 auto;
+  }
+  .err-dot {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: #ffffff;
+    color: #c73532;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 800;
+    box-shadow: 0 5px 16px rgba(0, 0, 0, 0.2);
+    flex: 0 0 auto;
+  }
+  .main-action-text {
+    min-width: 0;
+    color: var(--text-main);
+    font-size: 24px;
+    line-height: 1.2;
+    font-weight: 620;
+    letter-spacing: 0;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.32);
+  }
+  .sub-action-text {
+    color: var(--text-sub);
+    font-size: 12px;
+    font-weight: 480;
+    letter-spacing: 1.2px;
+    line-height: 1.45;
+    margin: 0;
+    max-width: min(650px, 100%);
+    max-height: 54px;
+    overflow: hidden;
+    text-shadow: 0 1px 5px rgba(0, 0, 0, 0.28);
+    white-space: pre-line;
+  }
+  .progress-container {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 15px;
+    min-height: 40px;
+  }
+  .progress-bar-bg {
+    grid-column: 1;
+    grid-row: 1;
+    width: 100%;
+    height: 5px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.2);
+    position: relative;
+    overflow: visible;
+    box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.12);
+    backdrop-filter: blur(8px);
+  }
+  .progress-bar-fill {
+    width: 4%;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #4facfe, #43d7f5);
+    box-shadow: 0 0 10px rgba(67, 215, 245, 0.38);
+    position: relative;
+    overflow: hidden;
+    transition: width 0.35s cubic-bezier(.23, 1, .32, 1), background-color 0.2s ease;
+  }
+  .progress-head {
+    position: absolute;
+    left: clamp(30px, var(--progress, 4%), calc(100% - 30px));
+    top: 50%;
+    width: 60px;
+    height: 40px;
+    object-fit: contain;
+    transform: translate(-50%, -80%);
+    pointer-events: none;
+    user-select: none;
+    transition: left 0.35s cubic-bezier(.23, 1, .32, 1);
+  }
+  .progress-bar-fill::after {
+    display: none;
+  }
+  .progress-bar-fill-error {
+    background: linear-gradient(90deg, #ff5f57, #ffbd2e);
+    box-shadow: 0 0 14px rgba(255, 95, 87, 0.46);
+  }
+  .progress-bar-fill-error::after {
+    display: none;
+  }
+  .progress-percentage {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 34px;
+    color: var(--text-main);
+    font-size: 12px;
+    font-weight: 560;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 1px 5px rgba(0, 0, 0, 0.28);
+  }
+  .uv-progress-container {
+    display: none;
+    margin-top: -3px;
+    margin-bottom: 15px;
+  }
+  .uv-progress-container.is-visible {
+    display: block;
+  }
+  .uv-progress-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 6px;
+    color: var(--text-sub);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .uv-progress-detail {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .uv-progress-bar-bg {
+    width: 100%;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.14);
+  }
+  .uv-progress-bar-fill {
+    position: relative;
+    width: 2%;
+    height: 100%;
+    overflow: hidden;
+    border-radius: inherit;
+    background: #55cda0;
+    box-shadow: 0 0 8px rgba(85, 205, 160, 0.34);
+    transition: width 0.4s cubic-bezier(.23, 1, .32, 1);
+  }
+  .uv-progress-bar-fill::after {
+    display: none;
+  }
+  .footer-info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    min-height: 28px;
+    font-size: 12px;
+  }
+  .tip-text {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    max-width: 520px;
+    color: var(--text-sub);
+    background: rgba(15, 23, 42, 0.26);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 12px;
+    padding: 7px 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 460;
+    backdrop-filter: blur(12px) saturate(1.1);
+  }
+  .tip-text::before {
+    content: "✦";
+    color: var(--primary-color);
+    font-size: 12px;
+    line-height: 1;
+    text-shadow: 0 0 10px rgba(79, 172, 254, 0.55);
+    flex: 0 0 auto;
+  }
+  .footer-right {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex: 0 0 auto;
+  }
+  .notice-text {
+    color: var(--text-muted);
+    white-space: nowrap;
+    font-weight: 450;
+  }
+  .splash-actions {
+    display: none;
+  }
+  .splash-actions-err {
+    display: block;
+  }
+  .splash-log-button {
+    min-height: 34px;
+    border: 1px solid rgba(255, 255, 255, 0.78);
+    border-radius: 12px;
+    padding: 0 14px;
+    color: #394451;
+    background: rgba(250, 250, 247, 0.78);
+    box-shadow: 0 4px 14px rgba(61, 79, 97, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.36);
+    backdrop-filter: blur(14px) saturate(1.15);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 560;
+    transition: transform 140ms cubic-bezier(.23, 1, .32, 1), background-color 140ms ease;
+  }
+  .splash-log-button:hover {
+    background: rgba(255, 255, 255, 0.9);
+  }
+  .splash-log-button:active {
+    transform: scale(0.97);
+  }
+  .splash-log-button:disabled {
+    cursor: default;
+    opacity: 0.65;
+  }
+  body.error-state .status-badge {
+    background: rgba(255, 255, 255, 0.18);
+    animation: none;
+  }
+  body.error-state .status-badge::before {
+    background: #ff5f57;
+    box-shadow: 0 0 12px rgba(255, 95, 87, 0.76);
+  }
+  body.error-state .tip-text {
+    border-color: rgba(255, 189, 46, 0.42);
+  }
+  body.error-state .tip-text::before {
+    color: #ffbd2e;
+  }
+  @media (max-width: 720px) {
+    .top-bar {
+      padding: 10px 16px;
+    }
+    .status-badge {
+      max-width: 180px;
+    }
+    .main-content {
+      padding: 0 28px 28px;
+    }
+    .main-action-text {
+      font-size: 22px;
+    }
+  }
+  @media (max-width: 560px), (max-height: 340px) {
+    .top-right {
+      gap: 12px;
+    }
+    .status-badge {
+      display: none;
+    }
+    .footer-info {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .footer-right {
+      width: 100%;
+      justify-content: space-between;
+    }
+    .tip-text {
+      max-width: 100%;
+    }
+  }
+  @media (max-height: 340px) {
+    .main-content {
+      padding-bottom: 24px;
+    }
+    .update-status {
+      margin-bottom: 18px;
+    }
+    .sub-action-text {
+      max-height: 36px;
+    }
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+</style>
+</head>
+<body>
+  <div class="launcher-window">
+    <video class="splash-background-video" autoplay muted loop playsinline preload="auto" aria-hidden="true">
+      <source src="data:video/mp4;base64,$VIDEO_BG" type="video/mp4">
+    </video>
+    <div id="splash-drag-region" class="top-bar">
+      <div class="brand-zone">
+        <span class="app-title">AzurPilot</span>
+        <span class="app-version">v$LAUNCHER_VERSION</span>
+      </div>
+      <div class="top-right">
+        <div id="badge" class="status-badge">
+          <span id="badge-text">$I18N_INITIALIZING</span>
+        </div>
+        <div class="window-controls">
+          <button id="window-minimize" class="win-btn minimize" type="button" aria-label="$I18N_MINIMIZE" title="$I18N_MINIMIZE">
+            <svg viewBox="0 0 8 8" aria-hidden="true"><line x1="2" y1="4" x2="6" y2="4"></line></svg>
+          </button>
+          <button id="window-close" class="win-btn close" type="button" aria-label="$I18N_CLOSE" title="$I18N_CLOSE">
+            <svg viewBox="0 0 8 8" aria-hidden="true"><line x1="2" y1="2" x2="6" y2="6"></line><line x1="6" y1="2" x2="2" y2="6"></line></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="main-content">
+      <div class="update-status">
+        <div class="title-group">
+          <div id="spinner" class="spinner"></div>
+          <div id="error-dot" class="err-dot" style="display:none;">!</div>
+          <h1 id="title" class="main-action-text">$I18N_STARTING</h1>
+        </div>
+        <p id="detail" class="sub-action-text">$I18N_WEBUI_INIT</p>
+      </div>
+
+      <div class="progress-container">
+        <div id="progress-pct" class="progress-percentage">4%</div>
+        <div class="progress-bar-bg">
+          <div id="progress-fill" class="progress-bar-fill" style="width: 4%;"></div>
+          <img class="progress-head" src="data:image/webp;base64,$PROGRESS_HEAD" alt="" aria-hidden="true" draggable="false">
+        </div>
+      </div>
+
+      <div id="uv-progress-container" class="uv-progress-container" aria-hidden="true">
+        <div class="uv-progress-header">
+          <span id="uv-progress-detail" class="uv-progress-detail"></span>
+          <span id="uv-progress-pct">0%</span>
+        </div>
+        <div class="uv-progress-bar-bg">
+          <div id="uv-progress-fill" class="uv-progress-bar-fill" style="width: 2%;"></div>
+        </div>
+      </div>
+
+      <div class="footer-info">
+        <div id="tip-text" class="tip-text">$I18N_DEFAULT_TIP</div>
+        <div class="footer-right">
+          <div id="progress-meta" class="notice-text">$I18N_PROGRESS_META</div>
+          <div id="splash-actions" class="splash-actions">
+            <button id="splash-log-button" class="splash-log-button" type="button">$I18N_DOWNLOAD_LOG</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const i18n = $I18N_JSON;
+    const defaultTip = i18n.defaultTip;
+    const invoke =
+      (window.__ALAS_NATIVE__ && window.__ALAS_NATIVE__.invoke);
+    const webviewDraggableRegionsEnabled = $NATIVE_TOUCH_DRAG;
+
+    window.addEventListener('contextmenu', event => {
+      event.preventDefault();
+    }, { capture: true });
+
+    function splitSubtitle(value) {
+      const text = String(value || '').trim();
+      if (!text) {
+        return { status: i18n.loading, tip: defaultTip };
+      }
+      const match = text.match(/^(.*?)\s*\|\s*Tips[:：]\s*(.*)$/);
+      if (!match) {
+        return { status: text, tip: defaultTip };
+      }
+      return {
+        status: match[1].trim() || i18n.loading,
+        tip: match[2].trim() || defaultTip,
+      };
+    }
+
+    function normalizeDetail(value) {
+      const text = String(value || '').trim();
+      return text || i18n.webuiInit;
+    }
+
+    window.__ALAS_SPLASH_UPDATE = function (payload) {
+      const badge = document.getElementById('badge');
+      const badgeText = document.getElementById('badge-text');
+      const spinner = document.getElementById('spinner');
+      const errorDot = document.getElementById('error-dot');
+      const progressFill = document.getElementById('progress-fill');
+      const progressPct = document.getElementById('progress-pct');
+      const uvProgressContainer = document.getElementById('uv-progress-container');
+      const uvProgressFill = document.getElementById('uv-progress-fill');
+      const uvProgressPct = document.getElementById('uv-progress-pct');
+      const uvProgressDetail = document.getElementById('uv-progress-detail');
+      const progressMeta = document.getElementById('progress-meta');
+      const splashActions = document.getElementById('splash-actions');
+      const subtitle = splitSubtitle(payload.subtitle);
+
+      badgeText.textContent = payload.is_error ? i18n.errorBadge : subtitle.status;
+      document.getElementById('tip-text').textContent = subtitle.tip;
+      document.getElementById('title').textContent = payload.title || i18n.starting;
+      document.getElementById('detail').textContent = normalizeDetail(payload.detail);
+      progressMeta.textContent = payload.is_error
+        ? i18n.initStopped
+        : i18n.progressMetaReady;
+
+      const progress = Math.max(0, Math.min(100, Number(payload.progress || 0)));
+      progressFill.style.width = progress + '%';
+      progressFill.parentElement.style.setProperty('--progress', progress + '%');
+      progressPct.textContent = progress + '%';
+
+      const uvState = payload.uv_progress;
+      const hasUvProgress = !payload.is_error
+        && uvState
+        && Number.isFinite(Number(uvState.progress));
+      uvProgressContainer.classList.toggle('is-visible', Boolean(hasUvProgress));
+      uvProgressContainer.setAttribute('aria-hidden', String(!hasUvProgress));
+      if (hasUvProgress) {
+        const uvProgress = Math.max(0, Math.min(99, Number(uvState.progress)));
+        uvProgressFill.style.width = uvProgress + '%';
+        uvProgressPct.textContent = uvProgress + '%';
+        uvProgressDetail.textContent = String(uvState.detail || '');
+      }
+
+      if (payload.is_error) {
+        document.body.classList.add('error-state');
+        badge.className = 'status-badge status-badge-err';
+        spinner.style.display = 'none';
+        errorDot.style.display = 'flex';
+        progressFill.className = 'progress-bar-fill progress-bar-fill-error';
+        splashActions.className = 'splash-actions splash-actions-err';
+      } else {
+        document.body.classList.remove('error-state');
+        badge.className = 'status-badge';
+        spinner.style.display = 'block';
+        errorDot.style.display = 'none';
+        progressFill.className = 'progress-bar-fill';
+        splashActions.className = 'splash-actions';
+      }
+    };
+
+    const splashDragRegion = document.getElementById('splash-drag-region');
+    splashDragRegion.addEventListener('pointerdown', event => {
+      if (!event.isPrimary || event.button !== 0 || event.target.closest('button')) {
+        return;
+      }
+      if (webviewDraggableRegionsEnabled) {
+        return;
+      }
+      event.preventDefault();
+      if (typeof invoke !== 'function') {
+        return;
+      }
+      invoke('window_start_dragging').catch(error => {
+        console.error('Failed to drag splash window', error);
+      });
+    });
+
+    document.getElementById('window-minimize').addEventListener('click', event => {
+      event.stopPropagation();
+      if (typeof invoke === 'function') {
+        invoke('window_minimize').catch(error => {
+          console.error('Failed to minimize splash window', error);
+        });
+      }
+    });
+
+    document.getElementById('window-close').addEventListener('click', event => {
+      event.stopPropagation();
+      if (typeof invoke === 'function') {
+        invoke('window_close').catch(error => {
+          console.error('Failed to close splash window', error);
+        });
+      }
+    });
+
+    document.getElementById('splash-log-button').addEventListener('click', async () => {
+      const button = document.getElementById('splash-log-button');
+      const progressMeta = document.getElementById('progress-meta');
+      button.disabled = true;
+      progressMeta.textContent = i18n.preparingLog;
+      try {
+        if (typeof invoke !== 'function') {
+          throw new Error('Tauri invoke is unavailable');
+        }
+        const filename = await invoke('download_today_launcher_log');
+        progressMeta.textContent = i18n.logSavedPrefix + filename;
+      } catch (error) {
+        progressMeta.textContent = i18n.logFailed + (error && error.message ? error.message : error);
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    window.__ALAS_SPLASH_READY = true;
+    if (typeof invoke === 'function') {
+      invoke('splash_ready').catch(error => {
+        console.error('Failed to acknowledge splash readiness', error);
+      });
+    }
+  </script>
+</body>
+</html>

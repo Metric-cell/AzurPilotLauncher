@@ -66,7 +66,7 @@ function boot({ nativeTitlebar = false, closePromptEnabled = true } = {}) {
   let choose = () => Promise.resolve();
   const window = {
     innerWidth: 800, addEventListener() {},
-    __TAURI_INTERNALS__: { invoke(command, args) { calls.push({ command, args }); return command === 'window_choose_close_behavior' ? choose(args) : Promise.resolve(false); } }
+    __ALAS_NATIVE__: { invoke(command, args) { calls.push({ command, args }); return command === 'window_choose_close_behavior' ? choose(args) : Promise.resolve(false); } }
   };
   window.top = window;
   vm.runInNewContext(`(function(){const i18n = {closeRememberHint:'remember', closeSaveFailed:'save failed'};const nativeTitlebar=${nativeTitlebar};const closePromptEnabled=${closePromptEnabled};\n${source}\n})();`, {

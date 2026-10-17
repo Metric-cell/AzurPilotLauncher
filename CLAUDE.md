@@ -134,8 +134,8 @@ Windows 和 Linux 移除原生窗口装饰（`set_decorations(false)`），通�
 - **Windows/macOS**：首次关闭显示“退出 / 最小化到托盘”菜单，选择成功保存后才执行。托盘菜单“关闭窗口时”可改为每次询问、最小化到托盘或退出应用；此处仅保存偏好，不立即关闭窗口，保存失败显示原生错误对话框。此后自绘关闭按钮、系统关闭和 Alt+F4 共用原生偏好。macOS 保留原生标题栏，仅注入关闭菜单。
 - **Linux**：无系统托盘，关闭直接退出，不提供后台选项，忽略 `--start-minimized`。
 - 偏好由 `src/preferences.rs` 的 `PreferenceStore` 保存在 Tauri `app_config_dir()/preferences.json`，与 WebView 存储、后端部署配置独立。通过同目录临时文件、同步及原子替换持久化，保存失败保持原先内存状态和窗口，菜单允许重试。缺失或损坏的文件回退首次询问。
-- 为兼容后端设置界面，提供 `window.__ALAS_NATIVE__.invoke('get_launcher_preferences')` 读取 `{closeBehavior, backgroundSupported}`，通过 `set_launcher_close_behavior` 的 `{behavior: 'ask' | 'tray' | 'exit'}` 修改。`src/preferences_bridge.js` 在主窗口初始化时安装，仅向本地后端页面提供这两个命令，确保 React 挂载时已可发现。后端设置 UI 需单独接入，本启动器独立提供托盘修改入口；关闭菜单使用 `window_choose_close_behavior` 先保存再关闭。
-- 关闭菜单 JS 位于 `src/ui/titlebar.js`，用 `node --test scripts/test-close-prompt.cjs scripts/test-preferences-bridge.cjs` 验证交互及设置桥接。
+- 为兼容后端设置界面，提供 `window.__ALAS_NATIVE__.invoke('get_launcher_preferences')` 读取 `{closeBehavior, backgroundSupported}`，通过 `set_launcher_close_behavior` 的 `{behavior: 'ask' | 'tray' | 'exit'}` 修改。统一的 `src/webview_bridge.js` 在文档初始化时提供这些受限接口，原生命令同时检查来源、窗口角色和主框架凭证。后端设置 UI 需单独接入，本启动器独立提供托盘修改入口；关闭菜单使用 `window_choose_close_behavior` 先保存再关闭。
+- 关闭菜单 JS 位于 `src/ui/titlebar.js`，用 `node --test scripts/test-close-prompt.cjs scripts/test-webview-bridge.cjs` 验证交互及设置桥接。
 - 托盘化仅隐藏主窗口，保留 WebView、页面和连接；恢复直接显示并聚焦，窗口意外丢失时仍可重建。保留页面会占用前端内存。
 
 ### Tauri 前端命令
@@ -199,8 +199,14 @@ GitHub Actions（`.github/workflows/package.yml`）：
 
 ### 签名更新模块
 
-`src/update/` 提供 Ed25519 原始清单签名、逐跳 HTTPS 来源约束、版本与序号回退保护、长度与 SHA256 校验及安装前复验。签名私钥仅用于发行，不嵌入程序；配置和签名工具见 [签名更新](docs/update-security.md)。本拆分提交先加入实现和测试，运行入口将在安全重构的应用装配提交中切换。
+`src/update/` 提供 Ed25519 原始清单签名、逐跳 HTTPS 来源约束、版本与序号回退保护、长度与 SHA256 校验及安装前复验。签名私钥仅用于发行，不嵌入程序；配置和签名工具见 [签名更新](docs/update-security.md)。应用入口只通过此模块执行自身更新。
 
 ### 安装与取消边界
 
 Windows 清单使用 `asInvoker`，安装器只安装到当前用户目录。Node.js 经用户同意后从固定官方来源下载便携包并验证固定摘要，保存到 LocalAppData；不执行 MSI、不修改持久 PATH、HKLM 或 ACL。环境准备拆入 `setup/`，安装命令的取消通过自有进程组回收；清理不跟随目录链接，开发工作区和 `--skip-update` 保留配置与锁文件，取消启动不删除已有 `.venv`。
+
+### 网页权限与应用装配
+
+`main.rs` 只负责应用装配与窗口生命周期；`commands.rs`、`ui/`、`webview_security.rs`、`popup_guard.rs` 分别负责原生命令、页面渲染、来源校验与原生弹窗拒绝。命令同时通过 AppManifest、窗口角色与主框架凭证验证，不给远端后端原生权限；日志不返回网页，导出需要用户选择路径并限制容量。免密与两条 SSE 接口只连接回环来源，事件和响应有长度上限。详见 [网页权限](docs/webview-security.md)。
+
+运行入口现已切换到 `update/` 的签名校验实现。构建未同时指定 `AZURPILOT_UPDATE_MANIFEST_URL` 和 `AZURPILOT_UPDATE_PUBLIC_KEY` 时禁用自身更新，不访问默认更新站、不嵌入 mTLS 私钥。后端 Git 更新仍按原部署配置执行；六份模板保留上游来源，新安装默认仅监听回环并关闭远程访问。

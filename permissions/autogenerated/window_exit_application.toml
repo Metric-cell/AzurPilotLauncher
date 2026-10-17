@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-window-exit-application"
+description = "Enables the window_exit_application command without any pre-configured scope."
+commands.allow = ["window_exit_application"]
+
+[[permission]]
+identifier = "deny-window-exit-application"
+description = "Denies the window_exit_application command without any pre-configured scope."
+commands.deny = ["window_exit_application"]

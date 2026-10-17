@@ -4,7 +4,7 @@
   "version": "2.2.4",
   "identifier": "moe.taiho.alas-launcher",
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "label": "main",
@@ -12,7 +12,7 @@
         "width": 1280,
         "height": 880,
         "resizable": true,
-        "additionalBrowserArgs": "--enable-features=msWebView2EnableDraggableRegions --disable-features=ElasticOverscroll,msWebOOUI,msPdfOOUI,msSmartScreenProtection --no-proxy-server",
+        "additionalBrowserArgs": "--enable-features=msWebView2EnableDraggableRegions --disable-features=ElasticOverscroll,msWebOOUI,msPdfOOUI --no-proxy-server",
         "url": "about:blank",
         "acceptFirstMouse": true,
         "visible": false,
@@ -25,7 +25,7 @@
         "height": 450,
         "resizable": false,
         "decorations": false,
-        "additionalBrowserArgs": "--enable-features=msWebView2EnableDraggableRegions --disable-features=ElasticOverscroll,msWebOOUI,msPdfOOUI,msSmartScreenProtection --no-proxy-server",
+        "additionalBrowserArgs": "--enable-features=msWebView2EnableDraggableRegions --disable-features=ElasticOverscroll,msWebOOUI,msPdfOOUI --no-proxy-server",
         "url": "about:blank",
         "acceptFirstMouse": true,
         "visible": false,

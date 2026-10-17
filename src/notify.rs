@@ -1,11 +1,11 @@
 //! 桌面通知模块：订阅后端的 SSE 通知流，并把事件转发为平台原生通知。
-//! `start_notify_stream` 在独立线程中维持对 `http://127.0.0.1:{port}/api/notify_stream`
-//! 的长连接，断线后固定间隔 3 秒重连，直到 `allow_exit` 置位；分发层按平台
+//! `start_notify_stream` 依据后端 HTTP/HTTPS 配置订阅 `/api/notify_stream`，
+//! 仅对真实事件流重连；缺少旧接口的后端停止订阅。分发层按平台
 //! 选择通知后端——Windows 用 tauri-winrt-notification（Toast），Linux 用
 //! notify-rust，macOS 等其余平台用 tauri-plugin-notification；由 main.rs 在后端就绪后启用。
 
 use std::{
-    io::{BufRead, BufReader},
+    io::BufReader,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -20,7 +20,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{anyhow, Result};
+#[cfg(windows)]
+use anyhow::anyhow;
+use anyhow::Result;
 #[cfg(target_os = "linux")]
 use notify_rust::{Hint, Notification};
 use reqwest::blocking::Client;
@@ -30,6 +32,11 @@ use serde::Deserialize;
 #[cfg(all(not(windows), not(target_os = "linux")))]
 use tauri_plugin_notification::NotificationExt;
 use tracing::{debug, info, warn};
+
+use crate::{
+    backend::WebuiLaunchConfig,
+    sse::{self, StreamOutcome},
+};
 
 /// 通知被点击时执行的回调。
 ///
@@ -53,16 +60,19 @@ const WINDOWS_APP_ID_UPDATE: &str = "moe.taiho.alas-launcher.notification.update
 const WINDOWS_APP_ID_ANNOUNCEMENT: &str = "moe.taiho.alas-launcher.notification.announcement";
 
 /// "一般"通知在操作中心里显示的应用名（随界面语言本地化）。
+#[cfg(windows)]
 fn windows_app_name() -> String {
     t!("notify.info_app_name").to_string()
 }
 
 /// "更新"通知在操作中心里显示的应用名。
+#[cfg(windows)]
 fn windows_app_name_update() -> String {
     t!("notify.update_app_name").to_string()
 }
 
 /// "公告"通知在操作中心里显示的应用名。
+#[cfg(windows)]
 fn windows_app_name_announcement() -> String {
     t!("notify.announcement_app_name").to_string()
 }
@@ -108,18 +118,34 @@ enum NotificationType {
 /// 均在此线程内静默重连，不影响启动器其他功能。
 pub fn start_notify_stream(
     app: tauri::AppHandle,
-    port: u16,
+    config: WebuiLaunchConfig,
     allow_exit: Arc<AtomicBool>,
     on_click: NotificationClickHandler,
 ) {
     thread::spawn(move || {
-        let url = format!("http://127.0.0.1:{port}/api/notify_stream");
+        let url = match config.backend_url() {
+            Ok(base) => {
+                let Ok(origin) = tauri::Url::parse(&base) else {
+                    return;
+                };
+                if !crate::webview_security::is_loopback_http_origin(&origin) {
+                    info!("Native notifications are disabled for non-loopback backends");
+                    return;
+                }
+                format!("{}api/notify_stream", base)
+            }
+            Err(e) => {
+                warn!("Invalid notification backend configuration: {e}");
+                return;
+            }
+        };
         // 连接超时 5 秒并绕过系统代理：目标是本机回环地址，走代理只会添乱。
-        let client = match Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .no_proxy()
-            .build()
-        {
+        let client = match config.http_client_builder().and_then(|builder| {
+            Ok(builder
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(30))
+                .build()?)
+        }) {
             Ok(client) => client,
             Err(e) => {
                 warn!("Unable to create notify stream client: {e}");
@@ -132,12 +158,16 @@ pub fn start_notify_stream(
         while !allow_exit.load(Ordering::SeqCst) {
             info!("Connecting to notify stream: {url}");
             match read_notify_stream(&client, &url, &app, &allow_exit, &on_click) {
-                Ok(()) => debug!("Notify stream ended"),
+                Ok(StreamOutcome::Ended) => debug!("Notify stream ended"),
+                Ok(StreamOutcome::Unsupported) => {
+                    info!("Backend does not provide the legacy desktop notification stream; subscription stopped");
+                    return;
+                }
                 Err(e) => warn!("Notify stream disconnected: {e}"),
             }
 
             if !allow_exit.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_secs(3));
+                sse::wait_to_reconnect(&allow_exit);
             }
         }
     });
@@ -158,66 +188,28 @@ fn read_notify_stream(
     app: &tauri::AppHandle,
     allow_exit: &AtomicBool,
     on_click: &NotificationClickHandler,
-) -> Result<()> {
+) -> Result<StreamOutcome> {
     // SSE 协议要求客户端声明 Accept: text/event-stream，后端据此返回流式响应。
     let response = client.get(url).header(ACCEPT, "text/event-stream").send()?;
 
-    if !response.status().is_success() {
-        return Err(anyhow!("server returned {}", response.status()));
+    if !sse::is_event_stream(&response)? {
+        return Ok(StreamOutcome::Unsupported);
     }
 
     // SSE 以空行作为一条事件（message）的边界，因此逐行缓冲读取。
-    let mut reader = BufReader::new(response);
-    let mut data_lines = Vec::new();
-
-    while !allow_exit.load(Ordering::SeqCst) {
-        let mut line = String::new();
-        let bytes = reader.read_line(&mut line)?;
-        // read_line 返回 0 字节表示对端已关闭连接，结束本次读取交由外层重连。
-        if bytes == 0 {
-            break;
-        }
-
-        let line = line.trim_end_matches(['\r', '\n']);
-        if line.is_empty() {
-            // 空行 = 事件结束：把积累的 data 行拼成分发一条通知。
-            dispatch_sse_data(&mut data_lines, app, on_click);
-            continue;
-        }
-
-        // 同一事件可拆成多个 data: 行，先累积，遇到空行时再统一处理。
-        if let Some(data) = line.strip_prefix("data:") {
-            data_lines.push(data.trim_start().to_owned());
+    let mut reader = sse::EventReader::new(BufReader::new(response));
+    while let Some(data) = reader.next(allow_exit)? {
+        match serde_json::from_str::<NotifyPayload>(&data) {
+            Ok(payload) => {
+                if allow_exit.load(Ordering::SeqCst) {
+                    break;
+                }
+                show_notification(app, payload, on_click);
+            }
+            Err(e) => warn!("Ignoring invalid notify payload: {e}"),
         }
     }
-
-    // 退出前把未跟随空行的残余数据也分发一次，避免丢失最后一条通知。
-    dispatch_sse_data(&mut data_lines, app, on_click);
-    Ok(())
-}
-
-/// 把一条 SSE 事件的 `data` 行集合还原为 JSON 并展示为桌面通知。
-///
-/// SSE 规范允许事件数据拆分为多个 `data:` 行，还原时需以换行拼接；
-/// 空 `data_lines`（如心跳注释产生的空行）直接忽略。
-fn dispatch_sse_data(
-    data_lines: &mut Vec<String>,
-    app: &tauri::AppHandle,
-    on_click: &NotificationClickHandler,
-) {
-    if data_lines.is_empty() {
-        return;
-    }
-
-    let data = data_lines.join("\n");
-    data_lines.clear();
-
-    // 载荷非法（JSON 损坏或字段类型不符）时仅告警丢弃，不让单个坏事件
-    // 拖垮整条通知流。
-    match serde_json::from_str::<NotifyPayload>(&data) {
-        Ok(payload) => show_notification(app, payload, on_click),
-        Err(e) => warn!("Ignoring invalid notify payload: {e}; payload={data}"),
-    }
+    Ok(StreamOutcome::Ended)
 }
 
 /// 把一条通知载荷渲染为标题与正文，并按平台分发给对应的通知后端。
@@ -239,7 +231,7 @@ fn show_notification(
 
     // updata 取值同时兼容布尔与字符串两种 JSON 形态；"ture"/"fl" 是后端
     // 历史版本发出过的错拼值，为保持向后兼容而一并识别。
-    let (title, notify_type) = if let Some(v) = updata {
+    let (title, _notify_type) = if let Some(v) = updata {
         if v.as_bool() == Some(true) || v.as_str() == Some("true") || v.as_str() == Some("ture") {
             (
                 t!("notify.update_title").to_string(),
@@ -274,7 +266,7 @@ fn show_notification(
     // Windows 走独立路径：Toast 支持按通知类型切换 AUMID，且能挂点击回调。
     #[cfg(windows)]
     {
-        if let Err(e) = show_windows_notification(&title, &body, notify_type, on_click.clone()) {
+        if let Err(e) = show_windows_notification(&title, &body, _notify_type, on_click.clone()) {
             warn!("Failed to show Windows notification: {e}");
         }
         // 该平台不使用 Tauri 通知插件，显式消费参数避免未使用告警。

@@ -74,6 +74,14 @@ fn query_platform() -> Result<AutostartStatus> {
 /// 禁用时删除对应值（值不存在时静默忽略，保持幂等）。
 #[cfg(windows)]
 fn set_enabled_platform(enabled: bool) -> Result<AutostartStatus> {
+    if read_run_value()?
+        .as_deref()
+        .is_some_and(|value| !is_current_launcher_command(value))
+    {
+        return Err(anyhow!(
+            "The AzurPilot startup entry belongs to another installation"
+        ));
+    }
     // create 会在键不存在时自动创建，保证写入路径总是可用
     let key = windows_registry::CURRENT_USER
         .create(RUN_KEY_PATH)
@@ -84,8 +92,11 @@ fn set_enabled_platform(enabled: bool) -> Result<AutostartStatus> {
         key.set_string(RUN_VALUE_NAME, &command)
             .map_err(|e| anyhow!("{e:?}"))?;
     } else {
-        // 目标值已不存在时 remove_value 会报错，但禁用的目标状态已达成，忽略即可
-        let _ = key.remove_value(RUN_VALUE_NAME);
+        if let Err(error) = key.remove_value(RUN_VALUE_NAME) {
+            if !registry_value_missing(error.code().0) {
+                return Err(anyhow!("{error:?}"));
+            }
+        }
     }
 
     // 统一走查询路径返回，确保调用方拿到的就是注册表的真实落盘结果
@@ -100,12 +111,19 @@ fn set_enabled_platform(enabled: bool) -> Result<AutostartStatus> {
 fn read_run_value() -> Result<Option<String>> {
     let key = match windows_registry::CURRENT_USER.open(RUN_KEY_PATH) {
         Ok(key) => key,
-        Err(_) => return Ok(None),
+        Err(error) if registry_value_missing(error.code().0) => return Ok(None),
+        Err(error) => return Err(anyhow!("{error:?}")),
     };
     match key.get_string(RUN_VALUE_NAME) {
         Ok(value) => Ok(Some(value)),
-        Err(_) => Ok(None),
+        Err(error) if registry_value_missing(error.code().0) => Ok(None),
+        Err(error) => Err(anyhow!("{error:?}")),
     }
+}
+
+#[cfg(windows)]
+fn registry_value_missing(code: i32) -> bool {
+    matches!(code as u32, 0x80070002 | 0x80070003)
 }
 
 /// 判断注册表中的命令行是否等于当前启动器应写入的自启命令。
