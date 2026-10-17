@@ -25,6 +25,8 @@ setup 的长命令与状态命令复用同一进程边界：取消、可展开�
 
 ## 用户级 Node.js
 
+超时恢复入口在 `preserve_workspace` 为真时直接拒绝执行，早于运行目录查找和 `.venv` 删除；开发检出与 `--skip-update` 不会因自动恢复重建已有环境。
+
 缺失与过旧都安装官方便携 zip，路径为 `%LOCALAPPDATA%\AzurPilotLauncher\nodejs\v<version>-win-<arch>`。来源与 SHA-256 在 `src/nodejs/source.rs` 中固定；只允许 `https://nodejs.org`，不跟随重定向，下载流式计算摘要后再从磁盘复验。URL、版本解析和文件事务与 Windows 编排分开，纯逻辑可在三平台测试。
 
 安装在同盘随机 `.install-*` 暂存目录下载、解压并探测版本，验证成功前不改动现有安装。发布失败恢复原目录；若恢复本身失败，保留旧目录并在错误中提供路径。取消清理仅本次暂存内容，PowerShell 解压及其子进程通过同一 owned job 回收。下载每次网络等待最长 20 秒，总时限 15 分钟；`node --version` 探测有 3 秒上限。成功后仅把已验证目录前置到当前启动器进程的 PATH，不修改系统/用户持久 PATH，不覆盖系统 Node。

@@ -360,6 +360,10 @@ pub fn rebuild_venv_and_sync_dependencies(
     cancel_requested: Arc<AtomicBool>,
     preserve_workspace: bool,
 ) -> Result<()> {
+    // 调用者的超时分支之外也保留保护，避免未来重用恢复入口时删除开发环境。
+    if preserve_workspace {
+        bail!(t!("errors.workspace_protected"));
+    }
     if cancel_requested.load(Ordering::SeqCst) {
         bail!(t!("setup.cancel_cleaning"));
     }
@@ -1884,5 +1888,18 @@ mod tests {
         assert!(is_reusable_venv_python_version((3, 14, 5)));
         assert!(is_reusable_venv_python_version((3, 14, 6)));
         assert!(!is_reusable_venv_python_version((3, 15, 0)));
+    }
+
+    #[test]
+    fn protected_workspace_recovery_stops_before_runtime_lookup() {
+        // 测试可执行文件没有后端目录；若越过保护而查询运行路径，会直接 panic。
+        let mut progress_reported = false;
+        let result = rebuild_venv_and_sync_dependencies(
+            |_| progress_reported = true,
+            Arc::new(AtomicBool::new(false)),
+            true,
+        );
+        assert!(result.is_err());
+        assert!(!progress_reported);
     }
 }
