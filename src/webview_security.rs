@@ -27,6 +27,7 @@ pub const APP_COMMANDS: &[&str] = &[
     "get_launcher_preferences",
     "set_launcher_close_behavior",
     "window_choose_close_behavior",
+    "open_project_repository",
     "save_as",
     "splash_ready",
     "download_today_gui_log",
@@ -65,6 +66,7 @@ const BACKEND_COMMANDS: &[&str] = &[
     "get_launcher_preferences",
     "set_launcher_close_behavior",
     "window_choose_close_behavior",
+    "open_project_repository",
     "save_as",
     "window_hide",
     "window_minimize",
@@ -330,6 +332,7 @@ impl WebviewPolicy {
             "errorUrl": self.error.as_str(),
             "backendOrigin": self.backend.origin().ascii_serialization(),
             "backendNative": self.backend_native,
+            "projectRepositoryLinks": [crate::commands::PROJECT_REPOSITORY_URL],
             "commands": {
                 "splash": SPLASH_COMMANDS,
                 "error": ERROR_COMMANDS,
@@ -815,6 +818,54 @@ mod tests {
                     "{untrusted}"
                 );
             }
+        }
+    }
+    #[test]
+    fn project_links_require_the_trusted_main_frame() {
+        let policy = policy();
+        for command in ["open_project_repository"] {
+            assert!(policy
+                .authorize(
+                    command,
+                    "main",
+                    "main",
+                    &policy.backend,
+                    &policy.backend_token
+                )
+                .is_ok());
+            assert!(policy
+                .authorize(
+                    command,
+                    "splash",
+                    "splash",
+                    &policy.splash,
+                    &policy.splash_token
+                )
+                .is_err());
+            assert!(policy
+                .authorize(
+                    command,
+                    "main",
+                    "child",
+                    &policy.backend,
+                    &policy.backend_token
+                )
+                .is_err());
+            assert!(policy
+                .authorize(
+                    command,
+                    "main",
+                    "main",
+                    &policy.backend,
+                    &policy.error_token
+                )
+                .is_err());
+            assert_eq!(
+                policy
+                    .authorize(command, "main", "main", &policy.error, &policy.error_token)
+                    .is_ok(),
+                command == "window_choose_close_behavior",
+            );
         }
     }
 }

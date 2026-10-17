@@ -30,7 +30,7 @@ Windows 清单为 `asInvoker`，安装器采用当前用户安装。Node.js 经�
 
 ## 网页与进程边界
 
-`commands.rs` 中的命令通过 AppManifest、来源/窗口角色和主框架凭证共同校验。`ui/` 负责内嵌页面、CSP 和动态内容转义；`popup_guard.rs` 在平台原生层拒绝弹窗。远端后端仅可展示页面，免密、原生命令、通知和反向控制限于回环来源。导出需要可见窗口和用户选择保存路径，受容量与并发限制。见 [网页权限](docs/webview-security.md)。
+`commands.rs` 中的命令通过 AppManifest、来源/窗口角色和主框架凭证共同校验。`ui/` 负责内嵌页面、CSP 和动态内容转义；`popup_guard.rs` 在平台原生层拒绝弹窗。远端后端仅可展示页面，免密、原生命令、通知和反向控制限于回环来源。导出需要可见窗口和用户选择保存路径，受容量与并发限制。可信主页面的固定项目仓库链接交给系统浏览器，只允许上游 `wess09/AzurPilot` 地址。见 [网页权限](docs/webview-security.md)。
 
 `process_security.rs` 只凭本次 spawn 持有的 Job/session 回收进程。端口冲突只报错，HTTP 就绪前后核对监听者归属。Windows 后端保留上游模拟器显式 Job breakaway 协议，普通 worker 继续回收，安装命令不获得脱离能力。见 [进程权限](docs/process-security.md) 和 [后端生命周期](docs/backend-lifecycle.md)。
 

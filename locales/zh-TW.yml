@@ -177,6 +177,7 @@ autostart:
 errors:
   save_launcher_preferences: "無法儲存啟動器設定：%{error}"
   close_behavior_unsupported: "目前系統不支援背景執行。"
+  open_project_failed: "無法開啟專案網頁：%{error}"
   backend_port_in_use: "後端連接埠 %{port} 已被其他程式占用，請關閉該程式或修改連接埠。"
   backend_invalid_host: "WebUI 主機名稱無效，請填寫單一主機名稱或 IP 位址。"
   nodejs_user_data_dir_not_found: "無法定位目前使用者的本機資料目錄。"

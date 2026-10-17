@@ -177,6 +177,7 @@ autostart:
 errors:
   save_launcher_preferences: "ランチャー設定を保存できません：%{error}"
   close_behavior_unsupported: "このシステムではバックグラウンド実行をサポートしていません。"
+  open_project_failed: "プロジェクトのページを開けませんでした：%{error}"
   backend_port_in_use: "バックエンドのポート %{port} は別のプログラムが使用しています。終了するかポートを変更してください。"
   backend_invalid_host: "WebUI ホストが無効です。単一のホスト名または IP アドレスを入力してください。"
   nodejs_user_data_dir_not_found: "現在のユーザーのローカルデータディレクトリが見つかりません。"

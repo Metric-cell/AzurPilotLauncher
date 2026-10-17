@@ -35,6 +35,12 @@
         : internal(url, errorUrl, true) || backend(url);
     } catch (_) { return false; }
   };
+  const isProjectRepository = target => {
+    try {
+      const url = new URL(target);
+      return policy.projectRepositoryLinks.some(link => url.href === link || url.href === link + '/');
+    } catch (_) { return false; }
+  };
 
   // Tauri 2.5.1 has no public on_new_window builder callback. These document-start
   // guards complement the Rust navigation guard; they do not replace a native veto.
@@ -46,7 +52,14 @@
     const anchor = path.find(node => node && node.tagName && /^(A|AREA)$/.test(node.tagName));
     if (!anchor) return;
     if (!allowsNavigation(anchor.href)) {
-      event.preventDefault(); event.stopImmediatePropagation(); return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      // 固定项目链接交给系统浏览器；只有可信主页面中的真实点击可以触发。
+      if (event.isTrusted && event.button === 0 && role() === 'backend' && isProjectRepository(anchor.href)) {
+        window.__ALAS_NATIVE__.invoke('open_project_repository').catch(error => {
+          window.alert(String(error));
+        });
+      }
+      return;
     }
     anchor.target = '_self';
     anchor.rel = 'noopener noreferrer';

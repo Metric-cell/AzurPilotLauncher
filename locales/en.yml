@@ -177,6 +177,7 @@ autostart:
 errors:
   save_launcher_preferences: "Could not save launcher settings: %{error}"
   close_behavior_unsupported: "Background operation is not supported on this system."
+  open_project_failed: "Could not open the project page: %{error}"
   backend_port_in_use: "Backend port %{port} is used by another program. Close it or change the port."
   backend_invalid_host: "Invalid WebUI host. Enter a single hostname or IP address."
   nodejs_user_data_dir_not_found: "Cannot locate the current user’s local data directory."

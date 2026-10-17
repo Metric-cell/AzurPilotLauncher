@@ -27,6 +27,90 @@ use crate::{
 /// 同时限制 IPC 解码产生的附加内存与 JS FileReader 输入。
 pub const MAX_EXPORT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_EXPORT_BASE64_BYTES: usize = MAX_EXPORT_BYTES.div_ceil(3) * 4;
+pub const PROJECT_REPOSITORY_URL: &str = "https://github.com/wess09/AzurPilot";
+
+/// 只打开编译时固定的项目仓库，不接收网页提供的 URL 或程序参数。
+#[tauri::command]
+pub async fn open_project_repository(caller: Caller) -> Result<(), String> {
+    caller.require_visible()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        caller.require_visible()?;
+        launch_project_browser().map_err(|error| {
+            rust_i18n::t!("errors.open_project_failed", error = error.to_string()).to_string()
+        })?;
+        info!("Opened project repository in default browser");
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[cfg(windows)]
+fn launch_project_browser() -> io::Result<()> {
+    use winapi::um::{
+        combaseapi::{CoInitializeEx, CoUninitialize},
+        objbase::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE},
+        shellapi::{ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW},
+        winuser::SW_SHOWNORMAL,
+    };
+    let url: Vec<u16> = PROJECT_REPOSITORY_URL
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let verb: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
+    // Shell 的浏览器关联处理器可能使用 COM；初始化和释放均留在当前工作线程。
+    unsafe {
+        let initialized = CoInitializeEx(
+            std::ptr::null_mut(),
+            COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE,
+        );
+        if initialized < 0 && initialized != winapi::shared::winerror::RPC_E_CHANGED_MODE {
+            return Err(io::Error::other(format!(
+                "COM initialization failed: {initialized:#x}"
+            )));
+        }
+        let mut request: SHELLEXECUTEINFOW = std::mem::zeroed();
+        request.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+        request.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+        request.lpVerb = verb.as_ptr();
+        request.lpFile = url.as_ptr();
+        request.nShow = SW_SHOWNORMAL;
+        let result = if ShellExecuteExW(&mut request) == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        };
+        if initialized >= 0 {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
+#[cfg(unix)]
+fn launch_project_browser() -> io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "/usr/bin/open"
+    } else {
+        "xdg-open"
+    };
+    let status = std::process::Command::new(opener)
+        .arg(PROJECT_REPOSITORY_URL)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("{opener} failed: {status}")))
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+fn launch_project_browser() -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "No system browser integration",
+    ))
+}
 
 #[cfg(not(target_os = "linux"))]
 type HideWindow = dyn Fn(&WebviewWindow) + Send + Sync;

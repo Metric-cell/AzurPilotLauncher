@@ -177,6 +177,7 @@ autostart:
 errors:
   save_launcher_preferences: "无法保存启动器设置：%{error}"
   close_behavior_unsupported: "当前系统不支持后台运行。"
+  open_project_failed: "无法打开项目网页：%{error}"
   backend_port_in_use: "后端端口 %{port} 已被其他程序占用，请关闭该程序或修改端口。"
   backend_invalid_host: "WebUI 主机名无效，请填写单个主机名或 IP 地址。"
   nodejs_user_data_dir_not_found: "无法定位当前用户的本地数据目录。"

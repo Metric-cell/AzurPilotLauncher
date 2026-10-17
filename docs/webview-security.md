@@ -24,6 +24,7 @@
 | `get_launcher_preferences` | — | — | ✓ |
 | `set_launcher_close_behavior` | — | — | ✓ |
 | `window_choose_close_behavior` | — | ✓ | ✓ |
+| `open_project_repository` | — | — | ✓ |
 | `save_as` | — | — | ✓ |
 | `splash_ready` | ✓ | — | — |
 | `download_today_gui_log` | — | ✓ | — |
@@ -41,7 +42,7 @@
 
 ## 三层 IPC 验证
 
-1. `build.rs` 使用 `tauri_build::AppManifest::new().commands(COMMANDS)` 声明上表全部 15 个应用命令。Tauri 为其生成 `allow-save-as` 等权限。少了 AppManifest，锁定版本默认不会对自定义应用命令执行 capability 拦截。
+1. `build.rs` 使用 `tauri_build::AppManifest::new().commands(COMMANDS)` 声明上表全部 16 个应用命令。Tauri 为其生成 `allow-save-as` 等权限。少了 AppManifest，锁定版本默认不会对自定义应用命令执行 capability 拦截。
 2. `install_capabilities()` 在 setup 最开始安装按窗口限制的运行时 capability。splash/error 只使用 `local: true`；回环 backend 单独使用 `local: false` 和精确 origin 的 remote URLPattern。没有 `core:default`、通知或 dialog 的 JavaScript 权限；Rust 内部 dialog 调用不需要这些权限。新增命令必须同步 AppManifest、Rust 来源矩阵和审核测试。
 3. 每个命令的 `Caller` 从实际 `CommandItem` 获取 WebView，检查 window/webview label 一致、当前顶层 URL、命令角色及私有凭证。缺失状态、URL 读取失败和不合法参数通过 `Result` 拒绝，不依赖 panic。
 
@@ -113,7 +114,7 @@ node --test scripts/test-close-prompt.cjs scripts/test-webview-bridge.cjs
 
 无需显示服务器的安全 harness 为 `tests/webview_security.rs`。它运行来源/凭证/权限矩阵、真实锁定 Tauri ACL、编码预算、文件路径/句柄、导出互斥和 UI script 注入测试。Node 脚本直接执行实际 bridge 模板，验证顶层/子框架、未知来源、导航后旧 wrapper、原始 invoke、token 参数覆盖及链接/表单弹窗防护；mock 接收端不替代 Rust 的实际授权测试。Linux CI 通过 `node --test scripts/test-close-prompt.cjs scripts/test-webview-bridge.cjs` 运行关闭菜单及统一 bridge 回归，显式安装 Node 22；脚本要求 Node 18 或更新版本。
 
-原始安全实现的 Linux harness 与 Node 动态测试已验证；新增偏好测试继续覆盖下述路径。WSLg `--preview-crash` 实际 smoke 中收到 `Splash main frame acknowledged readiness`，确认 splash 首次握手穿过 AppManifest、capability、主框架 bridge 和 Caller；运行 12 秒后 SIGINT 正常清理。完整仓库检查与 Windows/macOS 行为由三平台验收继续覆盖。
+自动化测试使用临时夹具，不启动完整桌面应用。原生插件、窗口可见性与跨进程行为还需在目标平台实测。
 
 桌面验收仍需检查 splash 首次 `splash_ready`、更新推送与重放、错误页重试和两个日志下载、32 MiB 内文件保存、取消对话框、标题栏拖动/关闭/托盘，以及 `window.open`、`target=_blank`、表单弹窗的原生拒绝。远端配置应能呈现但没有 native wrapper、免密请求和反向系统控制。
 
@@ -125,3 +126,6 @@ node --test scripts/test-close-prompt.cjs scripts/test-webview-bridge.cjs
 后端设置可通过统一的 `__ALAS_NATIVE__` 调用读取/设置命令；这两个命令仅授权本地后端。错误页只额外获得首次关闭选择命令，splash 无偏好权限。移除早期独立 `preferences_bridge.js`，避免重复定义桥或绕过角色 token。Rust 矩阵测试与 Node 动态测试覆盖三个偏好命令、错误角色/子框架/错误 token、设置参数转发及跨角色导航后的旧 wrapper 拒绝。
 
 托盘化保留主窗口及页面连接，只执行隐藏；恢复仍受 `StartupState` 门槛控制，窗口意外丢失时可重新创建。Linux 无托盘且直接退出，macOS 保留系统标题栏并注入关闭菜单。
+## 固定项目链接
+
+可信本地主页面中真实的左键点击可将 `https://github.com/wess09/AzurPilot`（可带末尾斜杠）交给系统浏览器。命令只打开编译时固定的上游地址，不接受页面提供的 URL 或程序参数；其他外链、脚本点击、弹窗和表单不能借此获得通用浏览器入口。Windows 在工作线程内使用 ShellExecuteExW，macOS/Linux 使用系统浏览器工具；失败显示本地化错误。

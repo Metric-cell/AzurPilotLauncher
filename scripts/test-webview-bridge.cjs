@@ -12,6 +12,8 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../src/webview_bridge.js'), 'utf8');
 const rust = fs.readFileSync(path.join(__dirname, '../src/webview_security.rs'), 'utf8');
+const commandSource = fs.readFileSync(path.join(__dirname, '../src/commands.rs'), 'utf8');
+const projectRepository = commandSource.match(/pub const PROJECT_REPOSITORY_URL: &str = "([^"]+)";/)[1];
 const commands = name => {
   const match = rust.match(new RegExp(`const ${name}: &\\[&str\\] = &\\[([\\s\\S]*?)\\];`));
   assert.ok(match, `missing Rust command matrix ${name}`);
@@ -22,12 +24,13 @@ const tokens = { splash: 's'.repeat(43), error: 'e'.repeat(43), backend: 'b'.rep
 function boot({
   href = 'http://127.0.0.1:22267/', label = 'main', webviewLabel = label,
   child = false, windows = false, backendNative = true,
-  backendOrigin = 'http://127.0.0.1:22267'
+  backendOrigin = 'http://127.0.0.1:22267', failProjectOpen = false
 } = {}) {
   const policy = {
     splashUrl: windows ? 'http://alas-splash.localhost/' : 'alas-splash://localhost/',
     errorUrl: windows ? 'http://alas-error.localhost/backend' : 'alas-error://localhost/backend',
     backendOrigin, backendNative,
+    projectRepositoryLinks: [projectRepository],
     commands: {
       splash: commands('SPLASH_COMMANDS'),
       error: commands('ERROR_COMMANDS'),
@@ -37,6 +40,7 @@ function boot({
   const listeners = new Map();
   const calls = [];
   const nativeCalls = [];
+  const alerts = [];
   const location = { href };
   const internal = (url, expected, query) => !url.username && !url.password
     && url.protocol === expected.protocol && url.hostname === expected.hostname
@@ -58,6 +62,7 @@ function boot({
       return Promise.reject(new Error('mock native boundary denied'));
     }
     nativeCalls.push({ command, args });
+    if (command === 'open_project_repository' && failProjectOpen) return Promise.reject(new Error('Browser unavailable'));
     return Promise.resolve('accepted');
   };
   class Form {
@@ -65,6 +70,7 @@ function boot({
   }
   const sandbox = {
     URL, Promise, Error, Object, location, HTMLFormElement: Form,
+    alert: message => alerts.push(message),
     document: { addEventListener: (type, handler) => listeners.set(type, handler) },
     __TAURI_INTERNALS__: {
       metadata: { currentWindow: { label }, currentWebview: { label: webviewLabel } },
@@ -78,10 +84,50 @@ function boot({
     .replace('__ALAS_SECURITY_TOKENS__', JSON.stringify(tokens));
   assert.ok(!/__ALAS_SECURITY_(?:POLICY|TOKENS)__/.test(script));
   vm.runInNewContext(script, sandbox, { filename: 'webview_bridge.js', timeout: 1000 });
-  return { window: sandbox, calls, nativeCalls, listeners, Form, policy };
+  return { window: sandbox, calls, nativeCalls, alerts, listeners, Form, policy };
 }
 
 const denied = promise => assert.rejects(promise, /denied/);
+
+test('真实项目链接点击通过固定命令打开浏览器，保留应用页面', async () => {
+  for (const href of [projectRepository, projectRepository + '/']) {
+    const context = boot();
+    const anchor = {tagName: 'A', href, target: '_blank'};
+    const click = {isTrusted: true, button: 0, composedPath: () => [anchor],
+      preventDefault() {this.prevented = true;}, stopImmediatePropagation() {this.stopped = true;}};
+    context.listeners.get('click')(click);
+    assert.equal(click.prevented, true);
+    assert.equal(click.stopped, true);
+    assert.equal(context.window.location.href, 'http://127.0.0.1:22267/');
+    assert.equal(context.nativeCalls.length, 1);
+    assert.equal(context.nativeCalls[0].command, 'open_project_repository');
+    assert.deepEqual(Object.keys(context.nativeCalls[0].args), ['launcherToken']);
+  }
+});
+
+test('外部打开拒绝合成点击、其他链接和非后端角色，并显示打开失败', async () => {
+  const click = (context, href, override = {}) => context.listeners.get('click')?.({
+    isTrusted: true, button: 0, composedPath: () => [{tagName: 'A', href}],
+    preventDefault() {}, stopImmediatePropagation() {}, ...override,
+  });
+  for (const href of ['https://evil.example/', projectRepository + '/issues', projectRepository + '?redirect=elsewhere',
+    'https://github.com.evil.example/wess09/AzurPilot', 'https://user@github.com/wess09/AzurPilot',
+    'javascript:alert(1)', 'file:///C:/Windows/notepad.exe']) {
+    const context = boot();click(context, href);assert.equal(context.nativeCalls.length, 0, href);
+  }
+  for (const fixture of [{child: true}, {href: 'alas-error://localhost/backend'},
+    {label: 'splash', href: 'alas-splash://localhost/'},
+    {href: 'https://webui.example/', backendOrigin: 'https://webui.example', backendNative: false}]) {
+    const context = boot(fixture);click(context, projectRepository);assert.equal(context.nativeCalls.length, 0);
+  }
+  for (const override of [{isTrusted: false}, {button: 1}, {button: 2}]) {
+    const context = boot();click(context, projectRepository, override);assert.equal(context.nativeCalls.length, 0);
+  }
+  const failure = boot({failProjectOpen: true});
+  click(failure, projectRepository);
+  await Promise.resolve();
+  assert.deepEqual(failure.alerts, ['Error: Browser unavailable']);
+});
 
 test('trusted top documents expose only the frozen native wrapper', async () => {
   for (const fixture of [
