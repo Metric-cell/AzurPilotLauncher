@@ -175,6 +175,12 @@ autostart:
 errors:
   save_launcher_preferences: "無法儲存啟動器設定：%{error}"
   close_behavior_unsupported: "目前系統不支援背景執行。"
+  backend_port_in_use: "後端連接埠 %{port} 已被其他程式占用，請關閉該程式或修改連接埠。"
+  backend_invalid_host: "WebUI 主機名稱無效，請填寫單一主機名稱或 IP 位址。"
+  backend_startup_cancelled: "後端啟動已取消。"
+  backend_tls_failed: "無法驗證後端 HTTPS 憑證，請檢查憑證信任及主機名稱：%{error}"
+  backend_invalid_tls: "HTTPS 必須同時設定 WebuiSSLKey 和 WebuiSSLCert。"
+  backend_invalid_port: "WebUI 連接埠必須介於 1 到 65535。"
   uv_not_found: "啟動器未內建 uv，且系統 PATH 中找不到 uv"
   write_uv_failed: "寫入內建 uv 到 %{path} 失敗"
   requests_install_failed: "安裝 deploy 基礎依賴 requests 失敗"

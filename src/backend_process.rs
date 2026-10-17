@@ -1,175 +1,52 @@
-//! Windows 后端使用允许显式脱离的 Job，避免退出时连带关闭模拟器。
+//! Windows 后端 Job 的实进程回归测试适配器。
 //!
-//! 普通 Python worker 继续继承 Job；只有 ALAS 的模拟器启动命令请求
-//! CREATE_BREAKAWAY_FROM_JOB。不能使用 SILENT_BREAKAWAY，否则 worker 也会泄漏。
+//! 生产实现由 process_security::OwnedProcessGroup 统一提供；测试继续验证
+//! 普通 worker 回收与模拟器显式 breakaway，不维护第二份 Job 实现。
 
+#[cfg(test)]
+use crate::process_security::OwnedProcessGroup;
+#[cfg(test)]
 use std::{
     io,
-    mem::size_of,
     os::windows::{
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
         process::CommandExt,
     },
-    process::{Child, Command, ExitStatus},
-    ptr,
-    sync::atomic::Ordering,
-    thread::sleep,
-    time::{Duration, Instant},
+    process::{Command, ExitStatus},
 };
+#[cfg(test)]
+use winapi::um::winbase::CREATE_NO_WINDOW;
 
-use winapi::um::{
-    handleapi::INVALID_HANDLE_VALUE,
-    jobapi2::{
-        AssignProcessToJobObject, CreateJobObjectW, QueryInformationJobObject,
-        SetInformationJobObject, TerminateJobObject,
-    },
-    processthreadsapi::{OpenThread, ResumeThread},
-    tlhelp32::{
-        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
-    },
-    winbase::{CREATE_NO_WINDOW, CREATE_SUSPENDED},
-    winnt::{
-        JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, THREAD_SUSPEND_RESUME,
-    },
-};
-
-use crate::window_util::HAS_CONSOLE;
-
-/// ALAS 只在启动器明确提供此能力时请求脱离，兼容旧启动器和直接运行 Python。
+#[cfg(test)]
 const BREAKAWAY_ENV: &str = "ALAS_LAUNCHER_JOB_BREAKAWAY";
 
-pub(crate) struct BackendChild {
-    child: Child,
-    job: OwnedHandle,
+#[cfg(test)]
+struct BackendChild {
+    group: OwnedProcessGroup,
+    status: Option<ExitStatus>,
 }
 
+#[cfg(test)]
 impl BackendChild {
-    pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
-        let raw_job = unsafe { CreateJobObjectW(ptr::null_mut(), ptr::null()) };
-        if raw_job.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let job = unsafe { OwnedHandle::from_raw_handle(raw_job as _) };
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags =
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
-        if unsafe {
-            SetInformationJobObject(
-                raw_job,
-                JobObjectExtendedLimitInformation,
-                &mut limits as *mut _ as _,
-                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-
-        // 先挂起、登记到 Job，再恢复，防止 Python 在登记之前派生不受管理的 worker。
-        let flags = CREATE_SUSPENDED
-            | if HAS_CONSOLE.load(Ordering::Relaxed) {
-                0
-            } else {
-                CREATE_NO_WINDOW
-            };
-        command.creation_flags(flags).env(BREAKAWAY_ENV, "1");
-        let mut child = command.spawn()?;
-        let setup = (|| {
-            if unsafe { AssignProcessToJobObject(raw_job, child.as_raw_handle() as _) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            resume_child(child.id())
-        })();
-        if let Err(error) = setup {
-            // 登记失败时也必须回收仍挂起的根进程；不能留下无法就绪的 Python。
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-        Ok(Self { child, job })
+    fn spawn(command: &mut Command) -> io::Result<Self> {
+        Ok(Self {
+            group: OwnedProcessGroup::spawn_backend(command)?,
+            status: None,
+        })
     }
 
-    pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.child.try_wait()
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.group.try_wait()
     }
 
-    pub(crate) fn kill(&mut self) -> io::Result<()> {
-        if unsafe { TerminateJobObject(self.job.as_raw_handle() as _, 1) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
+    fn kill(&mut self) -> io::Result<()> {
+        self.status = Some(self.group.terminate()?);
         Ok(())
     }
 
-    pub(crate) fn wait(&mut self) -> io::Result<ExitStatus> {
-        let status = self.child.wait()?;
-        // TerminateJobObject 发起终止后，根进程退出不代表最后一个 worker 已退出。
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-            if unsafe {
-                QueryInformationJobObject(
-                    self.job.as_raw_handle() as _,
-                    JobObjectBasicAccountingInformation,
-                    &mut accounting as *mut _ as _,
-                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
-                    ptr::null_mut(),
-                )
-            } == 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            if accounting.ActiveProcesses == 0 {
-                return Ok(status);
-            }
-            if Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "后端 Job 仍有工作进程未退出",
-                ));
-            }
-            sleep(Duration::from_millis(20));
-        }
-    }
-}
-
-/// std::process::Child 只暴露进程句柄，恢复初始线程需通过 Toolhelp 快照定位。
-fn resume_child(pid: u32) -> io::Result<()> {
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
-    if snapshot == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot as _) };
-    let mut entry = THREADENTRY32 {
-        dwSize: size_of::<THREADENTRY32>() as u32,
-        ..Default::default()
-    };
-    let mut found = unsafe { Thread32First(snapshot.as_raw_handle() as _, &mut entry) };
-    let mut resumed = false;
-    while found != 0 {
-        if entry.th32OwnerProcessID == pid {
-            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
-            if thread.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            let thread = unsafe { OwnedHandle::from_raw_handle(thread as _) };
-            let previous_count = unsafe { ResumeThread(thread.as_raw_handle() as _) };
-            if previous_count == u32::MAX {
-                return Err(io::Error::last_os_error());
-            }
-            // 快照可能包含注入线程；继续遍历，确保挂起的初始线程确实恢复。
-            resumed |= previous_count > 0;
-        }
-        found = unsafe { Thread32Next(snapshot.as_raw_handle() as _, &mut entry) };
-    }
-    if resumed {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "找不到后端进程的挂起线程",
-        ))
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.status
+            .ok_or_else(|| io::Error::other("test adapter requires kill before wait"))
     }
 }
 
@@ -210,6 +87,18 @@ mod tests {
             return;
         };
         let dir = std::path::PathBuf::from(std::env::var_os("ALAS_BACKEND_TEST_DIR").unwrap());
+        if role == "restricted" {
+            assert!(std::env::var_os(BREAKAWAY_ENV).is_none());
+            let escaped = fixture_command("emulator", &dir)
+                .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
+                .spawn();
+            if let Ok(mut child) = escaped {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("普通安装 Job 不应允许显式脱离");
+            }
+            return;
+        }
         if role == "backend" {
             assert_eq!(std::env::var(BREAKAWAY_ENV).unwrap(), "1");
             let _worker = fixture_command("worker", &dir)
@@ -288,6 +177,24 @@ mod tests {
         assert!(root.exited(3000), "后端根进程未回收");
         assert!(worker.exited(3000), "普通 worker 未回收");
         assert!(!emulator.exited(100), "显式脱离的模拟器被连带关闭");
+    }
+
+    #[test]
+    fn ordinary_command_cannot_break_away_or_inherit_backend_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut command = fixture_command("restricted", dir.path());
+        command.env(BREAKAWAY_ENV, "1");
+        let mut group = OwnedProcessGroup::spawn(&mut command).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = group.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(Instant::now() < deadline, "普通 Job fixture 未退出");
+            sleep(Duration::from_millis(20));
+        }
+        group.terminate().unwrap();
     }
 
     #[test]

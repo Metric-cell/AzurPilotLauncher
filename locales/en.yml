@@ -175,6 +175,12 @@ autostart:
 errors:
   save_launcher_preferences: "Could not save launcher settings: %{error}"
   close_behavior_unsupported: "Background operation is not supported on this system."
+  backend_port_in_use: "Backend port %{port} is used by another program. Close it or change the port."
+  backend_invalid_host: "Invalid WebUI host. Enter a single hostname or IP address."
+  backend_startup_cancelled: "Backend startup was cancelled."
+  backend_tls_failed: "Cannot verify the backend HTTPS certificate. Check certificate trust and hostname: %{error}"
+  backend_invalid_tls: "HTTPS requires both WebuiSSLKey and WebuiSSLCert."
+  backend_invalid_port: "The WebUI port must be between 1 and 65535."
   uv_not_found: "Launcher does not have built-in uv, and uv was not found in system PATH"
   write_uv_failed: "Failed to write built-in uv to %{path}"
   requests_install_failed: "Failed to install deploy base dependency: requests"

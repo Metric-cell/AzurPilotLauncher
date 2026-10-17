@@ -115,7 +115,7 @@ locales/
    - `ensure_runtime_tools()`：下载 Python 3.14.6（通过 uv managed python）、创建可重定位 `.venv`、复制 uv/adb/git 到 `.venv`；检测到 `.venv` 的 Python 低于 3.14.5 时会删除并重建整个环境
    - `git_update()`：通过 Python 脚本调用 `deploy.git.GitManager` 拉取最新代码（带重试，最多 20 次）
    - `uv_sync_project()`：执行 `uv sync --frozen --no-dev --no-install-project` 安装依赖
-4. `ManagedBackend::new()` 启动 `gui.py`，设置 `ALAS_LAUNCHER_PID` 环境变量，等待端口就绪（60 秒超时）
+4. `ManagedBackend::new()` 启动 `gui.py`，在五分钟内确认 HTTP(S) 就绪与监听者归属；支持取消，`ALAS_LAUNCHER_PID` 仅作子进程诊断标记
 5. 启动 SSE 通知流（`/api/notify_stream`），销毁 splash 窗口，显示 main 窗口
 
 ### 自定义 URI 协议
@@ -142,20 +142,9 @@ Windows 和 Linux 移除原生窗口装饰（`set_decorations(false)`），通�
 
 `save_as`、`download_today_gui_log`、`download_today_launcher_log`、`retry_backend_connection`、`window_hide`、`window_minimize`、`window_toggle_maximize`、`window_close`、`get_launcher_preferences`、`set_launcher_close_behavior`、`window_choose_close_behavior`、`window_start_dragging`、`window_is_maximized`
 
-### 端口占用清理
+### 后端进程归属
 
-`backend.rs` 在启动 `gui.py` 前会清理占用目标端口的进程：
-- **Windows**：解析 `netstat -ano -p tcp` 输出获取 PID
-- **Unix**：通过 `lsof -nP -iTCP:{port} -sTCP:LISTEN -t` 获取 PID
-- 使用 `sysinfo` 库 kill 进程，等待端口释放（最多 5 秒）
-
-### 子进程泄漏清理
-
-`ManagedBackend` 的 `Drop` 实现会扫描所有进程的环境变量，查找包含 `ALAS_LAUNCHER_PID={当前PID}` 的子进程并 kill，防止 `gui.py` 子进程泄漏。
-
-Windows 后端由 `src/backend_process.rs` 创建允许显式脱离的 Job；普通 worker 仍随 Job 回收，
-ALAS 启动模拟器时根据 `ALAS_LAUNCHER_JOB_BREAKAWAY=1` 请求脱离，并清除清理标记和信任密钥。
-两边需配套更新，协议、失败处理与隔离验证见 [后端进程生命周期](docs/backend-lifecycle.md)。
+`ManagedBackend` 只结束本次创建并持有的 Job/session，端口占用只报错，不按进程名或环境标记补杀。就绪检查使用 HTTP(S) 并验证监听者归属，TLS 始终验证证书链和主机名。Windows 的后端 Job 保留显式 breakaway 协议，让模拟器脱离而普通 worker 随启动器回收；安装命令不获得该能力。详见 [后端生命周期](docs/backend-lifecycle.md) 和 [进程边界](docs/process-security.md)。
 
 ### 平台相关代码
 

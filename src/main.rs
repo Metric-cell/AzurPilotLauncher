@@ -25,6 +25,8 @@
 mod autostart;
 /// gui.py 后端子进程的托管（启动、就绪探测、终止等）。
 mod backend;
+/// 只依据本次创建的内核身份回收子进程。
+mod process_security;
 /// Windows 后端 Job：回收工作进程，同时允许模拟器显式脱离。
 #[cfg(windows)]
 mod backend_process;
@@ -2821,7 +2823,7 @@ fn main() -> Result<()> {
                         // 后端启动循环：启动超时且未恢复过时，重建 venv 并重试一次。
                         let mut backend_recovery_used = false;
                         let backend_result = loop {
-                            match ManagedBackend::new(&webui_config) {
+                            match ManagedBackend::new(&webui_config, &setup_cancel_requested) {
                                 Ok(backend) => break Ok(backend),
                                 Err(error)
                                     if !backend_recovery_used
