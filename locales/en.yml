@@ -108,7 +108,7 @@ dialog:
   nodejs_install_failed: "Node.js installation failed"
   nodejs_install_failed_detail: "Node.js could not be installed automatically. Please try again or install it manually.\n\n%{error}"
   confirm_exit: "Are you sure you want to leave? You can exit or let it run silently in the background."
-  close_remember_hint: "This choice will be remembered. You can change it in System Settings."
+  close_remember_hint: "This choice will be remembered. You can change it in the tray menu."
   close_save_failed: "Could not save the close preference. Please try again."
   exit: "Exit"
   minimize_to_tray: "Minimize to tray"
@@ -118,6 +118,10 @@ dialog:
   backend_launch_failed: "Failed to start the local service. Retry, or check the log for details.\n\n%{error}"
 
 tray:
+  close_behavior: "When closing the window"
+  close_ask: "Ask every time"
+  close_tray: "Minimize to tray"
+  close_exit: "Exit application"
   toggle_visibility: "Show / Hide"
   quit: "Quit"
   tooltip: "AzurPilot"

@@ -16,7 +16,7 @@
 //! - 时间炸弹：运行时从内嵌 Cargo.toml 解析过期配置，经 HTTP Date 头获取
 //!   网络时间比对，过期则弹窗并阻止启动；
 //! - 三平台关闭行为：Windows/macOS 首次询问并保存退出或托盘偏好，
-//!   Linux 关闭时退出；系统设置可修改偏好。
+//!   Linux 关闭时退出；托盘菜单可修改偏好，并提供后端设置接口。
 
 // 在 Windows 上不创建默认控制台窗口
 #![windows_subsystem = "windows"]
@@ -2529,15 +2529,21 @@ fn main() -> Result<()> {
                 let recreating_main_window_for_menu = recreating_main_window_for_setup.clone();
                 #[cfg(windows)]
                 let recreating_main_window_for_tray = recreating_main_window_for_setup.clone();
-                // 托盘菜单：显示/隐藏主窗口与退出两项。
+                // 托盘菜单提供窗口操作及关闭偏好；偏好选项只保存，不立即关闭。
                 let show_item = MenuItemBuilder::new(t!("tray.toggle_visibility"))
                     .id("toggle_visibility")
                     .build(app)?;
                 let quit_item = MenuItemBuilder::new(t!("tray.quit"))
                     .id("quit")
                     .build(app)?;
+                let close_behavior_menu = tauri::menu::SubmenuBuilder::new(app, t!("tray.close_behavior"))
+                    .text("close_behavior_ask", t!("tray.close_ask"))
+                    .text("close_behavior_tray", t!("tray.close_tray"))
+                    .text("close_behavior_exit", t!("tray.close_exit"))
+                    .build()?;
                 let tray_menu = MenuBuilder::new(app)
                     .item(&show_item)
+                    .item(&close_behavior_menu)
                     .separator()
                     .item(&quit_item)
                     .build()?;
@@ -2576,6 +2582,24 @@ fn main() -> Result<()> {
                                     port,
                                     recreating_main_window_for_menu.clone(),
                                 );
+                            }
+                            "close_behavior_ask" | "close_behavior_tray" | "close_behavior_exit" => {
+                                let behavior = match event.id().as_ref() {
+                                    "close_behavior_tray" => CloseBehavior::Tray,
+                                    "close_behavior_exit" => CloseBehavior::Exit,
+                                    _ => CloseBehavior::Ask,
+                                };
+                                if let Err(message) = save_close_behavior(
+                                    &app.state::<PreferenceStore>(),
+                                    behavior,
+                                ) {
+                                    warn!("Unable to save close behavior from tray: {message}");
+                                    app.dialog()
+                                        .message(message)
+                                        .title(t!("dialog.close_save_failed"))
+                                        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                                        .show(|_| {});
+                                }
                             }
                             "quit" => {
                                 allow_exit.store(true, Ordering::SeqCst);

@@ -41,6 +41,16 @@ jobs:
             build-essential pkg-config libwebkit2gtk-4.1-dev libxdo-dev \
             libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
+      - name: Setup Node.js (Linux only)
+        if: runner.os == 'Linux'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test close prompt and preferences bridge (Linux only)
+        if: runner.os == 'Linux'
+        run: node --test scripts/test-close-prompt.cjs scripts/test-preferences-bridge.cjs
+
       - name: Install stable Rust
         run: |
           rustup toolchain install stable --profile minimal

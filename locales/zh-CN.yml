@@ -108,7 +108,7 @@ dialog:
   nodejs_install_failed: "Node.js 安装失败"
   nodejs_install_failed_detail: "无法自动安装 Node.js。请重试或手动安装。\n\n%{error}"
   confirm_exit: "确认要离开吗？您可以选择退出，或者让它在后台默默运行"
-  close_remember_hint: "将记住此选择，可在系统设置中更改。"
+  close_remember_hint: "将记住此选择，可在托盘菜单中更改。"
   close_save_failed: "无法保存关闭选项，请重试。"
   exit: "退出"
   minimize_to_tray: "最小化到托盘"
@@ -118,6 +118,10 @@ dialog:
   backend_launch_failed: "无法启动本地服务，可重试或查看日志了解详情。\n\n%{error}"
 
 tray:
+  close_behavior: "关闭窗口时"
+  close_ask: "每次询问"
+  close_tray: "最小化到托盘"
+  close_exit: "退出应用"
   toggle_visibility: "显示 / 隐藏"
   quit: "退出"
   tooltip: "AzurPilot"

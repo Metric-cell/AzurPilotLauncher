@@ -131,10 +131,10 @@ Windows 和 Linux 移除原生窗口装饰（`set_decorations(false)`），通�
 
 ### 窗口关闭行为
 
-- **Windows/macOS**：首次关闭显示“退出 / 最小化到托盘”菜单，选择成功保存后才执行。此后自绘关闭按钮、系统关闭和 Alt+F4 共用原生偏好。macOS 保留原生标题栏，仅注入关闭菜单。
+- **Windows/macOS**：首次关闭显示“退出 / 最小化到托盘”菜单，选择成功保存后才执行。托盘菜单“关闭窗口时”可改为每次询问、最小化到托盘或退出应用；此处仅保存偏好，不立即关闭窗口，保存失败显示原生错误对话框。此后自绘关闭按钮、系统关闭和 Alt+F4 共用原生偏好。macOS 保留原生标题栏，仅注入关闭菜单。
 - **Linux**：无系统托盘，关闭直接退出，不提供后台选项，忽略 `--start-minimized`。
 - 偏好由 `src/preferences.rs` 的 `PreferenceStore` 保存在 Tauri `app_config_dir()/preferences.json`，与 WebView 存储、后端部署配置独立。通过同目录临时文件、同步及原子替换持久化，保存失败保持原先内存状态和窗口，菜单允许重试。缺失或损坏的文件回退首次询问。
-- 系统设置通过 `window.__ALAS_NATIVE__.invoke('get_launcher_preferences')` 读取 `{closeBehavior, backgroundSupported}`，通过 `set_launcher_close_behavior` 的 `{behavior: 'ask' | 'tray' | 'exit'}` 修改。`src/preferences_bridge.js` 在主窗口初始化时安装，仅向本地后端页面提供这两个命令，确保 React 挂载时已可发现；菜单使用 `window_choose_close_behavior` 先保存再关闭。
+- 为兼容后端设置界面，提供 `window.__ALAS_NATIVE__.invoke('get_launcher_preferences')` 读取 `{closeBehavior, backgroundSupported}`，通过 `set_launcher_close_behavior` 的 `{behavior: 'ask' | 'tray' | 'exit'}` 修改。`src/preferences_bridge.js` 在主窗口初始化时安装，仅向本地后端页面提供这两个命令，确保 React 挂载时已可发现。后端设置 UI 需单独接入，本启动器独立提供托盘修改入口；关闭菜单使用 `window_choose_close_behavior` 先保存再关闭。
 - 关闭菜单 JS 位于 `src/ui/titlebar.js`，用 `node --test scripts/test-close-prompt.cjs scripts/test-preferences-bridge.cjs` 验证交互及设置桥接。
 - 托盘化仅隐藏主窗口，保留 WebView、页面和连接；恢复直接显示并聚焦，窗口意外丢失时仍可重建。保留页面会占用前端内存。
 
@@ -183,7 +183,7 @@ ALAS 启动模拟器时根据 `ALAS_LAUNCHER_JOB_BREAKAWAY=1` 请求脱离，并
 - 触发条件：推送 `main`、所有 PR 或手动 `workflow_dispatch`
 - 测试矩阵：`ubuntu-22.04`、`macos-latest`、`windows-latest`、`windows-11-arm`
 - 安装 Linux Tauri 系统依赖及 stable Rust，按 runner/架构缓存 Cargo 依赖；仅 `main` 保存缓存
-- 执行 `cargo check --locked --all-targets` 和 `cargo test --locked --all-targets`，覆盖启动器和示例目标
+- 执行 `cargo check --locked --all-targets` 和 `cargo test --locked --all-targets`，覆盖启动器和示例目标；Linux 额外通过 Node.js 22 运行关闭菜单与偏好桥接回归脚本
 - 同一事件/分支的新运行取消旧运行；单个矩阵任务失败不取消其他平台，超时为 45 分钟
 - 使用 `build.rs` 的 uv/mTLS 空占位符，不需要发布密钥，也不执行打包或部署
 - Windows 托管 runner 以管理员身份运行，满足启动器 manifest 和 Node.js 安全目录 ACL 的要求；Windows 本地测试也需管理员终端
